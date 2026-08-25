@@ -1,0 +1,47 @@
+# ─── Dependencies ───
+node_modules/
+.pnp
+.pnp.js
+
+# ─── Build output ───
+dist/
+build/
+*.tsbuildinfo
+
+# ─── Environment ───
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ─── Prisma ───
+prisma/*.db
+prisma/*.db-journal
+prisma/migrations/dev/
+
+# ─── Secrets / keys ───
+keys/
+*.pem
+
+# ─── Logs ───
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── Uploads (local stub storage) ───
+storage/
+uploads/
+tmp/
+
+# ─── Editor / OS ───
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ─── Testing ───
+coverage/
+.nyc_output/

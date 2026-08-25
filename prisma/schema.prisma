@@ -1,0 +1,466 @@
+// ══════════════════════════════════════════════════════════════════
+//  Vocation Movement Platform — Prisma Schema (PRD §2)
+//
+//  The DATABASE is the source of truth and uses PRD-native enums
+//  (RELIGIOUS/SPONSOR/ADMIN, SCHOOL_FEES, …) and integer-cents money.
+//  The API serialisation layer (src/common/serializers) maps these
+//  back into the frontend's canonical `types.ts` shapes.
+// ══════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── Enums ───────────────────────────
+
+enum Role {
+  RELIGIOUS
+  SPONSOR
+  ADMIN
+}
+
+enum Stage {
+  SEMINARIAN
+  NOVICE
+  POSTULANT
+}
+
+enum BillCategory {
+  SCHOOL_FEES
+  CLOTHING
+  FEEDING
+  BOOKS
+  MEDICAL
+  MISC
+}
+
+enum BillStatus {
+  ACTIVE
+  FUNDED
+  OVERDUE
+  ARCHIVED
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  REFUNDED
+}
+
+enum Gateway {
+  STRIPE
+  PAYSTACK
+}
+
+// Mirrors the frontend VerificationStatus, driven by the boolean flags
+// on User plus this explicit field for the "Rejected" case.
+enum VerificationState {
+  PENDING
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum SponsorshipStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+}
+
+enum MessageSenderType {
+  STUDENT
+  SPONSOR
+}
+
+enum NotificationType {
+  PAYMENT_RECEIVED
+  MESSAGE_RECEIVED
+  MESSAGE_REPLY
+  PROFILE_APPROVED
+  PROFILE_REJECTED
+  RECURRING_SUCCESS
+  RECURRING_FAILED
+  SPONSORSHIP_CANCELLED
+  BILL_OVERDUE
+  SYSTEM
+}
+
+enum AdminActionType {
+  VERIFY_PROFILE
+  REJECT_PROFILE
+  REQUEST_INFO
+  SUSPEND_USER
+  UNSUSPEND_USER
+  UPDATE_SETTINGS
+  DELETE_INQUIRY
+}
+
+enum InquiryStatus {
+  UNREAD
+  READ
+  REPLIED
+}
+
+// ─────────────────────────── Core ───────────────────────────
+
+/// All accounts: religious students, sponsors, admins. Role-based.
+model User {
+  id           String  @id @default(cuid())
+  email        String  @unique
+  passwordHash String
+  role         Role    @default(RELIGIOUS)
+  isVerified   Boolean @default(false) // email verified
+  isApproved   Boolean @default(false) // admin approved (students only)
+  isSuspended  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  religiousProfile ReligiousProfile?
+  sponsorProfile   SponsorProfile?
+
+  notifications      Notification[]
+  emailTokens        EmailToken[]
+  adminActionsActor  AdminAction[]  @relation("AdminActor")
+  adminActionsTarget AdminAction[]  @relation("AdminTarget")
+
+  @@index([role])
+  @@index([isApproved])
+  @@map("users")
+}
+
+/// Extended profile for religious student users.
+model ReligiousProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  slug             String   @unique
+  fullName         String
+  photoUrl         String?
+  biography        String   @default("")
+  formationStage   Stage
+  congregationName String
+  schoolName       String
+  country          String
+  location         String   @default("")
+  phoneNumber      String   @default("")
+  dateOfBirth      DateTime?
+  gender           String?
+  yearOfFormation  Int?
+  expectedYear     Int?
+
+  // Verification workflow
+  verificationState VerificationState @default(PENDING)
+  rejectionReason   String?
+
+  // Derived aggregates (kept in sync by the payment worker)
+  totalNeededCents Int @default(0) // sum of all active bill totals
+  totalRaisedCents Int @default(0) // sum of all confirmed contributions
+  sponsorCount     Int @default(0)
+  profileCompletion Int @default(0) // 0-100
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bills            Bill[]
+  payments         Payment[]
+  verificationDocs VerificationDoc[]
+  sentMessages     Message[]         @relation("StudentMessages")
+  sponsorships     Sponsorship[]
+
+  @@index([verificationState])
+  @@index([congregationName])
+  @@map("religious_profiles")
+}
+
+/// Extended profile for sponsor users (preferences, anonymous default).
+model SponsorProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName           String
+  country            String  @default("")
+  currency           String  @default("USD")
+  anonymousByDefault Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments        Payment[]
+  sponsorships    Sponsorship[]
+  receivedMessages Message[]    @relation("SponsorMessages")
+
+  @@map("sponsors")
+}
+
+/// Each financial need item created by a religious student.
+model Bill {
+  id          String       @id @default(cuid())
+  religiousId String
+  religious   ReligiousProfile @relation(fields: [religiousId], references: [id], onDelete: Cascade)
+
+  name         String
+  category     BillCategory
+  totalCents   Int
+  raisedCents  Int          @default(0)
+  dueDate      DateTime
+  status       BillStatus   @default(ACTIVE)
+  description  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  paymentSplits PaymentSplit[]
+  sponsorships  Sponsorship[]
+
+  @@index([religiousId])
+  @@index([status])
+  @@map("bills")
+}
+
+/// Every transaction made on the platform. Source of truth for financials.
+model Payment {
+  id          String @id @default(cuid())
+  sponsorId   String
+  religiousId String
+
+  sponsor   SponsorProfile   @relation(fields: [sponsorId], references: [id])
+  religious ReligiousProfile @relation(fields: [religiousId], references: [id])
+
+  amountCents   Int // total across splits, smallest currency unit
+  currency      String        @default("USD")
+  isAnonymous   Boolean       @default(false)
+  status        PaymentStatus @default(PENDING)
+  gateway       Gateway
+  gatewayTxId   String        @unique // Stripe/Paystack charge ID or intent id
+  gatewayRef    String?       // client secret / access code (transient)
+  isRecurring   Boolean       @default(false)
+  sponsorshipId String?       // links to Sponsorship if recurring
+  sponsorship   Sponsorship?  @relation(fields: [sponsorshipId], references: [id])
+  failureReason String?
+
+  createdAt   DateTime  @default(now())
+  confirmedAt DateTime?
+
+  splits PaymentSplit[]
+
+  @@index([sponsorId])
+  @@index([religiousId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+/// Maps a payment to a specific bill (one payment can fund multiple bills).
+model PaymentSplit {
+  id        String @id @default(cuid())
+  paymentId String
+  billId    String
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  bill    Bill    @relation(fields: [billId], references: [id])
+
+  amountCents Int // how much of this payment goes to this bill
+
+  @@index([paymentId])
+  @@index([billId])
+  @@map("payment_splits")
+}
+
+/// Recurring monthly sponsorships (Stripe Subscription / Paystack Plan).
+model Sponsorship {
+  id          String @id @default(cuid())
+  sponsorId   String
+  religiousId String
+  billId      String
+
+  sponsor   SponsorProfile   @relation(fields: [sponsorId], references: [id])
+  religious ReligiousProfile @relation(fields: [religiousId], references: [id])
+  bill      Bill             @relation(fields: [billId], references: [id])
+
+  amountCents        Int
+  currency           String            @default("USD")
+  status             SponsorshipStatus @default(ACTIVE)
+  gateway            Gateway
+  gatewaySubId       String?           // Stripe subscription / Paystack subscription code
+  nextChargeDate     DateTime
+  isAnonymous        Boolean           @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments Payment[]
+
+  @@index([sponsorId])
+  @@index([status])
+  @@index([nextChargeDate])
+  @@map("sponsorships")
+}
+
+/// Thank-you messages from religious students to sponsors.
+model Message {
+  id          String @id @default(cuid())
+  studentId   String
+  sponsorId   String
+
+  student ReligiousProfile @relation("StudentMessages", fields: [studentId], references: [id])
+  sponsor SponsorProfile   @relation("SponsorMessages", fields: [sponsorId], references: [id])
+
+  // Snapshot of the donor's presentation at send time (supports admin-proxied anonymity)
+  anonymousDonor  Boolean @default(false)
+  subject         String
+  body            String
+  photoAttachment String?
+  read            Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  replies MessageReply[]
+
+  @@index([studentId])
+  @@index([sponsorId])
+  @@map("messages")
+}
+
+/// Nested reply under a message thread.
+model MessageReply {
+  id        String @id @default(cuid())
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  from      MessageSenderType
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([messageId])
+  @@map("message_replies")
+}
+
+/// In-app notification feed for all user types.
+model Notification {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    NotificationType
+  title   String
+  body    String
+  read    Boolean          @default(false)
+  meta    Json? // arbitrary payload (paymentId, billId, …)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([read])
+  @@map("notifications")
+}
+
+/// Audit log of all admin operations (verify, suspend, flag).
+model AdminAction {
+  id      String @id @default(cuid())
+  actorId String
+  actor   User   @relation("AdminActor", fields: [actorId], references: [id])
+
+  targetUserId String?
+  targetUser   User?   @relation("AdminTarget", fields: [targetUserId], references: [id])
+
+  action AdminActionType
+  reason String?
+  meta   Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([actorId])
+  @@index([targetUserId])
+  @@index([createdAt])
+  @@map("admin_actions")
+}
+
+/// Uploaded documents submitted by students for admin review.
+model VerificationDoc {
+  id          String @id @default(cuid())
+  religiousId String
+  religious   ReligiousProfile @relation(fields: [religiousId], references: [id], onDelete: Cascade)
+
+  label    String // "Admission Letter", "Recommendation", "Formation ID"
+  fileUrl  String // signed-url key in private S3 bucket
+  mimeType String
+  sizeBytes Int    @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([religiousId])
+  @@map("verification_docs")
+}
+
+/// Generated congregation/platform reports metadata.
+model Report {
+  id          String @id @default(cuid())
+  kind        String // "congregation" | "platform" | "monthly"
+  title       String
+  fileUrl     String
+  params      Json?
+  generatedBy String?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime?
+
+  @@map("reports")
+}
+
+/// Contact-form inquiries from the public site (§7.7).
+model ContactInquiry {
+  id      String        @id @default(cuid())
+  name    String
+  email   String
+  phone   String?
+  message String
+  status  InquiryStatus @default(UNREAD)
+
+  createdAt DateTime @default(now())
+
+  @@index([status])
+  @@map("contact_inquiries")
+}
+
+/// Email verification / password-reset tokens.
+model EmailToken {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  token   String   @unique
+  purpose String // "verify-email" | "reset-password"
+  expires DateTime
+  usedAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("email_tokens")
+}
+
+/// Platform configuration (admin settings) — single-row table.
+model PlatformSettings {
+  id                String  @id @default("singleton")
+  organizationName  String  @default("Vocation Movement")
+  supportEmail      String  @default("support@vocationmovement.org")
+  defaultCurrency   String  @default("USD")
+  platformFeePercent Float  @default(0)
+  minGiftCents      Int     @default(100)
+  autoApprove       Boolean @default(false)
+  maintenanceMode   Boolean @default(false)
+  anonymousDefault  Boolean @default(false) // new sponsors give anonymously unless they opt out
+  emailReceipts     Boolean @default(true)  // send an emailed receipt after every confirmed gift
+
+  updatedAt DateTime @updatedAt
+
+  @@map("platform_settings")
+}

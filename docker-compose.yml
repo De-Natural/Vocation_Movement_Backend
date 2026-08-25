@@ -1,0 +1,79 @@
+# ══════════════════════════════════════════════════════════════════
+#  Local development infrastructure: PostgreSQL 16 + Redis
+#  Usage:  docker compose up -d
+#  The API itself runs on the host via `npm run start:dev` (fast reload)
+#  and connects to these containers. A production api service is included
+#  but commented — uncomment to run the full stack in containers.
+# ══════════════════════════════════════════════════════════════════
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vocation-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vocation
+      POSTGRES_PASSWORD: vocation
+      POSTGRES_DB: vocation
+    ports:
+      - "5432:5432"
+    volumes:
+      - vocation-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vocation -d vocation"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: vocation-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - vocation-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── Optional: run the API + worker in containers too ───
+  # api:
+  #   build: .
+  #   container_name: vocation-api
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_URL: postgresql://vocation:vocation@postgres:5432/vocation?schema=public
+  #     REDIS_URL: redis://redis:6379
+  #   ports:
+  #     - "4000:4000"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   command: sh -c "npx prisma migrate deploy && node dist/main"
+  #
+  # worker:
+  #   build: .
+  #   container_name: vocation-worker
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_URL: postgresql://vocation:vocation@postgres:5432/vocation?schema=public
+  #     REDIS_URL: redis://redis:6379
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   command: node dist/worker
+
+volumes:
+  vocation-pgdata:
+  vocation-redisdata:

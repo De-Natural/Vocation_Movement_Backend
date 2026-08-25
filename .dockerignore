@@ -1,0 +1,15 @@
+node_modules
+dist
+build
+.git
+.env
+.env.local
+storage
+uploads
+tmp
+logs
+coverage
+*.log
+prisma/*.db
+.DS_Store
+Thumbs.db
