@@ -10,6 +10,7 @@ import { ProvidersModule } from './providers/providers.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { AggregationModule } from './aggregation/aggregation.module';
+import { SettingsModule } from './settings/settings.module';
 
 // Feature modules
 import { AuthModule } from './auth/auth.module';
@@ -52,6 +53,7 @@ import { AllExceptionsFilter } from './common/http/all-exceptions.filter';
     NotificationsModule,
     UploadsModule,
     AggregationModule,
+    SettingsModule,
     ScheduleModule.forRoot(),
 
     // Features

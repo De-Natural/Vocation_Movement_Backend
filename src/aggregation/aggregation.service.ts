@@ -41,10 +41,13 @@ export class AggregationService {
     if (!bill) return;
 
     const agg = await db.paymentSplit.aggregate({
-      _sum: { amountCents: true },
+      _sum: { netAmountCents: true },
       where: { billId, payment: { status: 'CONFIRMED' } },
     });
-    const raisedCents = agg._sum.amountCents ?? 0;
+    // Progress bars track the NET credited to the bill (gift − platform fee,
+    // Fee Model A). Legacy/seeded splits have netAmountCents == amountCents,
+    // so this is identical to the old gross sum until a fee is charged.
+    const raisedCents = agg._sum.netAmountCents ?? 0;
 
     let status = bill.status;
     if (status !== 'ARCHIVED') {
@@ -76,7 +79,7 @@ export class AggregationService {
 
     const [raised, needed, sponsors] = await Promise.all([
       db.payment.aggregate({
-        _sum: { amountCents: true },
+        _sum: { netAmountCents: true },
         where: { religiousId, status: 'CONFIRMED' },
       }),
       db.bill.aggregate({
@@ -93,7 +96,9 @@ export class AggregationService {
     await db.religiousProfile.update({
       where: { id: religiousId },
       data: {
-        totalRaisedCents: raised._sum.amountCents ?? 0,
+        // Net of platform fee, to match the sum of this profile's bill
+        // progress bars (recomputeBill also sums netAmountCents).
+        totalRaisedCents: raised._sum.netAmountCents ?? 0,
         totalNeededCents: needed._sum.totalCents ?? 0,
         sponsorCount: sponsors.length,
       },

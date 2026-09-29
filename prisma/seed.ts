@@ -270,6 +270,11 @@ async function main() {
               sponsorId: sponsorProfile.id,
               religiousId: profile.id,
               amountCents: cents(amt),
+              // Seeded gifts predate any platform fee: net == gross so the
+              // seeded `raised` history is preserved when recomputeBill (which
+              // sums netAmountCents) next runs.
+              feeCents: 0,
+              netAmountCents: cents(amt),
               currency: 'USD',
               isAnonymous: anon,
               status: 'CONFIRMED',
@@ -277,7 +282,13 @@ async function main() {
               gatewayTxId: `SEED-TXN-${i}-${d.category}-${idx}`,
               confirmedAt: new Date('2026-08-03'),
               splits: {
-                create: [{ billId: bill.id, amountCents: cents(amt) }],
+                create: [
+                  {
+                    billId: bill.id,
+                    amountCents: cents(amt),
+                    netAmountCents: cents(amt),
+                  },
+                ],
               },
             },
           });
