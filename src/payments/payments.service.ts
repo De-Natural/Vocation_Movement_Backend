@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.module';
 import { AggregationService } from '../aggregation/aggregation.service';
 import { NotificationsService } from '../notifications/notifications.module';
+import { SettingsService } from '../settings/settings.service';
 import { APP_CONFIG, AppConfig } from '../config/configuration';
 import { AppException } from '../common/http/app-exception';
 import { AuthUser } from '../common/auth/jwt-payload';
@@ -44,6 +45,7 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly aggregation: AggregationService,
     private readonly notifications: NotificationsService,
+    private readonly settings: SettingsService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(STRIPE_GATEWAY) private readonly stripe: PaymentGateway,
     @Inject(PAYSTACK_GATEWAY) private readonly paystack: PaymentGateway,
@@ -51,6 +53,23 @@ export class PaymentsService {
 
   private gatewayFor(gateway: Gateway): PaymentGateway {
     return gateway === 'STRIPE' ? this.stripe : this.paystack;
+  }
+
+  /**
+   * Fee Model A breakdown for a gift, using the current effective platform
+   * fee %. Returns the platform fee and the net credited to the bill; the
+   * sponsor is still charged the full `amountCents` (gross). With fee% = 0
+   * (the default) feeCents is 0 and netAmountCents == amountCents.
+   */
+  private async feeFor(
+    amountCents: number,
+  ): Promise<{ feeCents: number; netAmountCents: number }> {
+    const { platformFeePercent } = await this.settings.effective();
+    const { feeCents, netCents } = this.settings.computeFee(
+      amountCents,
+      platformFeePercent,
+    );
+    return { feeCents, netAmountCents: netCents };
   }
 
   /** Resolve the SponsorProfile (+user email) owned by a user. */
@@ -105,6 +124,7 @@ export class PaymentsService {
     const amountCents = unitsToCents(dto.amount);
     const currency = sponsor.currency || this.config.defaults.currency;
     const isAnonymous = dto.anonymous ?? sponsor.anonymousByDefault;
+    const { feeCents, netAmountCents } = await this.feeFor(amountCents);
 
     // Create the PENDING payment + its single split first so we have an id
     // to correlate the webhook against.
@@ -113,13 +133,15 @@ export class PaymentsService {
         sponsorId: sponsor.id,
         religiousId: bill.religiousId,
         amountCents,
+        feeCents,
+        netAmountCents,
         currency,
         isAnonymous,
         status: 'PENDING',
         gateway,
         gatewayTxId: pendingTxId(),
         isRecurring: false,
-        splits: { create: [{ billId: bill.id, amountCents }] },
+        splits: { create: [{ billId: bill.id, amountCents, netAmountCents }] },
       },
     });
 
@@ -207,6 +229,7 @@ export class PaymentsService {
     const amountCents = unitsToCents(dto.amount);
     const currency = sponsor.currency || this.config.defaults.currency;
     const isAnonymous = dto.anonymous ?? sponsor.anonymousByDefault;
+    const { feeCents, netAmountCents } = await this.feeFor(amountCents);
 
     const nextChargeDate = new Date();
     nextChargeDate.setMonth(nextChargeDate.getMonth() + 1);
@@ -231,6 +254,8 @@ export class PaymentsService {
             sponsorId: sponsor.id,
             religiousId: bill.religiousId,
             amountCents,
+            feeCents,
+            netAmountCents,
             currency,
             isAnonymous,
             status: 'PENDING',
@@ -238,7 +263,7 @@ export class PaymentsService {
             gatewayTxId: pendingTxId(),
             isRecurring: true,
             sponsorshipId: sub.id,
-            splits: { create: [{ billId: bill.id, amountCents }] },
+            splits: { create: [{ billId: bill.id, amountCents, netAmountCents }] },
           },
         });
         return { sponsorship: sub, payment: pay };
@@ -368,12 +393,17 @@ export class PaymentsService {
     });
     if (!sponsorship || sponsorship.status !== 'ACTIVE') return;
 
+    const chargeCents = event.amountCents ?? sponsorship.amountCents;
+    const { feeCents, netAmountCents } = await this.feeFor(chargeCents);
+
     const created = await this.prisma.$transaction(async (tx) => {
       const pay = await tx.payment.create({
         data: {
           sponsorId: sponsorship.sponsorId,
           religiousId: sponsorship.religiousId,
-          amountCents: event.amountCents ?? sponsorship.amountCents,
+          amountCents: chargeCents,
+          feeCents,
+          netAmountCents,
           currency: event.currency ?? sponsorship.currency,
           isAnonymous: sponsorship.isAnonymous,
           status: 'CONFIRMED',
@@ -386,7 +416,8 @@ export class PaymentsService {
             create: [
               {
                 billId: sponsorship.billId,
-                amountCents: event.amountCents ?? sponsorship.amountCents,
+                amountCents: chargeCents,
+                netAmountCents,
               },
             ],
           },

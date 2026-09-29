@@ -235,7 +235,9 @@ model Payment {
   sponsor   SponsorProfile   @relation(fields: [sponsorId], references: [id])
   religious ReligiousProfile @relation(fields: [religiousId], references: [id])
 
-  amountCents   Int // total across splits, smallest currency unit
+  amountCents   Int // gross gift total across splits, smallest currency unit (what the sponsor is charged)
+  feeCents      Int           @default(0) // platform fee deducted from the gift (Model A); 0 when fee% = 0
+  netAmountCents Int          @default(0) // amountCents − feeCents; the amount credited to bills / progress bars
   currency      String        @default("USD")
   isAnonymous   Boolean       @default(false)
   status        PaymentStatus @default(PENDING)
@@ -268,7 +270,8 @@ model PaymentSplit {
   payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
   bill    Bill    @relation(fields: [billId], references: [id])
 
-  amountCents Int // how much of this payment goes to this bill
+  amountCents    Int // gross portion of this payment allocated to this bill (drives Contribution.amount)
+  netAmountCents Int @default(0) // portion net of platform fee (drives Bill.raised / the progress bar)
 
   @@index([paymentId])
   @@index([billId])
