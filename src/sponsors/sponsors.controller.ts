@@ -38,6 +38,15 @@ export class SponsorsController {
     return ok(await this.sponsors.dashboard(user.userId));
   }
 
+  // GET /api/sponsors/:id/dashboard — sponsor dashboard by sponsor profile id or user id
+  @Get(':id/dashboard')
+  async dashboardById(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+  ) {
+    return ok(await this.sponsors.dashboardById(id, user.userId));
+  }
+
   // GET /api/sponsors/me/students — students this sponsor has funded
   @Get('me/students')
   async students(@CurrentUser() user: AuthUser) {
@@ -59,6 +68,15 @@ export class SponsorsController {
   @Get('me/recurring')
   async recurring(@CurrentUser() user: AuthUser) {
     return ok(await this.sponsors.recurring(user.userId));
+  }
+
+  // GET /api/sponsors/:id/recurring — monthly gifts by sponsor ID
+  @Get(':id/recurring')
+  async recurringById(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+  ) {
+    return ok(await this.sponsors.recurringById(id, user.userId));
   }
 
   // POST /api/sponsors/profile — create/update own profile

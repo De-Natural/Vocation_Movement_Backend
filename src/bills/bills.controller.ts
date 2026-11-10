@@ -1,11 +1,13 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
   Post,
   Put,
+  Query,
 } from '@nestjs/common';
 import { BillsService } from './bills.service';
 import { ok } from '../common/http/response';
@@ -22,6 +24,22 @@ import {
 @Controller('bills')
 export class BillsController {
   constructor(private readonly bills: BillsService) {}
+
+  // GET /api/bills?studentId=:id — query-param style expected by frontend
+  @Public()
+  @Get()
+  async list(
+    @Query('studentId') studentId?: string,
+    @Query('religiousId') religiousId?: string,
+  ) {
+    const id = studentId || religiousId;
+    if (id) {
+      const bills = await this.bills.listForReligious(id);
+      return ok(bills);
+    }
+    const bills = await this.bills.listAllActive();
+    return ok(bills);
+  }
 
   // GET /api/bills/religious/:id — public list of a student's active bills
   @Public()
@@ -52,6 +70,29 @@ export class BillsController {
   ) {
     const bill = await this.bills.update(user.userId, billId, dto);
     return ok(bill, 'Bill updated');
+  }
+
+  // PATCH /api/bills/:id — partial edit (student only)
+  @Roles('RELIGIOUS')
+  @Patch(':id')
+  async patch(
+    @CurrentUser() user: AuthUser,
+    @Param('id') billId: string,
+    @Body(new ZodValidationPipe(updateBillSchema)) dto: UpdateBillInput,
+  ) {
+    const bill = await this.bills.update(user.userId, billId, dto);
+    return ok(bill, 'Bill updated');
+  }
+
+  // DELETE /api/bills/:id — delete bill (student only)
+  @Roles('RELIGIOUS')
+  @Delete(':id')
+  async delete(
+    @CurrentUser() user: AuthUser,
+    @Param('id') billId: string,
+  ) {
+    const res = await this.bills.remove(user.userId, billId);
+    return ok(res, 'Bill removed');
   }
 
   // PATCH /api/bills/:id/archive — soft-hide (student only)

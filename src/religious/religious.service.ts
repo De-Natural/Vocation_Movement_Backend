@@ -337,6 +337,57 @@ export class ReligiousService {
     };
   }
 
+  /**
+   * Helper to resolve the underlying student user ID from an ID, slug, or 'me'.
+   * Enforces that non-admins can only access their own dashboard/payments.
+   */
+  async resolveStudentUserId(
+    identifier: string,
+    requestingUserId: string,
+    isAdmin = false,
+  ): Promise<string> {
+    if (identifier === 'me' || identifier === requestingUserId) {
+      return requestingUserId;
+    }
+
+    const profile = await this.prisma.religiousProfile.findFirst({
+      where: {
+        OR: [
+          { id: identifier },
+          { userId: identifier },
+          { slug: identifier },
+        ],
+      },
+      select: { userId: true },
+    });
+
+    if (!profile) {
+      throw AppException.notFound('Student not found', 'STUDENT_NOT_FOUND');
+    }
+
+    if (!isAdmin && profile.userId !== requestingUserId) {
+      throw AppException.forbidden(
+        'You can only view your own student dashboard',
+        'FORBIDDEN',
+      );
+    }
+
+    return profile.userId;
+  }
+
+  async dashboardById(
+    identifier: string,
+    requestingUserId: string,
+    isAdmin = false,
+  ) {
+    const userId = await this.resolveStudentUserId(
+      identifier,
+      requestingUserId,
+      isAdmin,
+    );
+    return this.dashboard(userId);
+  }
+
   // ─────────────────── Received payments (contributions) ───────────────────
   /** Flattened confirmed contribution splits addressed to this student. */
   async receivedPayments(userId: string, limit?: number) {
@@ -352,6 +403,20 @@ export class ReligiousService {
     });
     // Student view is NOT admin — anonymous donors stay hidden.
     return splits.map((s) => serializeContribution(s));
+  }
+
+  async receivedPaymentsById(
+    identifier: string,
+    requestingUserId: string,
+    isAdmin = false,
+    limit?: number,
+  ) {
+    const userId = await this.resolveStudentUserId(
+      identifier,
+      requestingUserId,
+      isAdmin,
+    );
+    return this.receivedPayments(userId, limit);
   }
 
   // ─────────────────── helpers ───────────────────

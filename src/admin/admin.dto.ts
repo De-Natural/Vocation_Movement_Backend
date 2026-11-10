@@ -25,12 +25,25 @@ export const transactionsQuerySchema = z.object({
   congregation: z.string().optional(),
   donorType: z.enum(['all', 'named', 'anonymous']).default('all'),
   status: z.enum(['Confirmed', 'Pending', 'Failed']).optional(),
+  role: z.string().optional(), // student | sponsor | all
+  minAmount: z.union([z.string(), z.number()]).optional(),
+  maxAmount: z.union([z.string(), z.number()]).optional(),
+  amountRange: z.string().optional(), // e.g. "10-100"
+  format: z.enum(['json', 'csv']).optional(),
+  export: z.union([z.string(), z.boolean()]).optional(),
   from: z.string().optional(), // YYYY-MM-DD
   to: z.string().optional(),
   page: z.union([z.string(), z.number()]).optional(),
   perPage: z.union([z.string(), z.number()]).optional(),
 });
 export type TransactionsQuery = z.infer<typeof transactionsQuerySchema>;
+
+// Student verification update (PATCH /admin/students/:id/verification).
+export const updateVerificationSchema = z.object({
+  status: z.string().min(1, 'Status is required'),
+  reason: z.string().max(2000).optional(),
+});
+export type UpdateVerificationInput = z.infer<typeof updateVerificationSchema>;
 
 // Verification queue filter (?status=).
 export const verificationsQuerySchema = z.object({

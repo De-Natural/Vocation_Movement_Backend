@@ -132,6 +132,61 @@ export class SponsorsService {
     };
   }
 
+  /**
+   * Helper to resolve the target sponsor userId from identifier ('me', sponsor profile id, or user id).
+   * Validates ownership if caller is not an admin.
+   */
+  async resolveUserId(
+    identifier: string,
+    requestingUserId: string,
+    isAdmin = false,
+  ): Promise<string> {
+    if (identifier === 'me' || identifier === requestingUserId) {
+      return requestingUserId;
+    }
+
+    const sponsor = await this.prisma.sponsorProfile.findFirst({
+      where: {
+        OR: [
+          { id: identifier },
+          { userId: identifier },
+        ],
+      },
+      select: { userId: true },
+    });
+
+    if (!sponsor) {
+      throw AppException.notFound('Sponsor profile not found', 'SPONSOR_NOT_FOUND');
+    }
+
+    if (!isAdmin && sponsor.userId !== requestingUserId) {
+      throw AppException.forbidden(
+        'You can only view your own sponsor dashboard',
+        'FORBIDDEN',
+      );
+    }
+
+    return sponsor.userId;
+  }
+
+  async dashboardById(
+    identifier: string,
+    requestingUserId: string,
+    isAdmin = false,
+  ) {
+    const userId = await this.resolveUserId(identifier, requestingUserId, isAdmin);
+    return this.dashboard(userId);
+  }
+
+  async recurringById(
+    identifier: string,
+    requestingUserId: string,
+    isAdmin = false,
+  ) {
+    const userId = await this.resolveUserId(identifier, requestingUserId, isAdmin);
+    return this.recurring(userId);
+  }
+
   // ─────────────────── My Students ───────────────────
 
   /**
