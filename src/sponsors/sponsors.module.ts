@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { SponsorsController } from './sponsors.controller';
+import { RecurringController } from './recurring.controller';
 import { SponsorsService } from './sponsors.service';
 
 /**
@@ -10,7 +11,7 @@ import { SponsorsService } from './sponsors.service';
  * deletes history — the Sponsorship flips to CANCELLED.
  */
 @Module({
-  controllers: [SponsorsController],
+  controllers: [SponsorsController, RecurringController],
   providers: [SponsorsService],
   exports: [SponsorsService],
 })

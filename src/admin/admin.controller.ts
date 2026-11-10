@@ -6,7 +6,9 @@ import {
   Patch,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import { Response } from 'express';
 import { AdminService } from './admin.service';
 import { ok } from '../common/http/response';
 import { Roles, CurrentUser } from '../common';
@@ -27,6 +29,8 @@ import {
   UpdateSettingsInput,
   generateReportSchema,
   GenerateReportInput,
+  updateVerificationSchema,
+  UpdateVerificationInput,
 } from './admin.dto';
 
 // Every route here is admin-only.
@@ -70,6 +74,23 @@ export class AdminController {
     return ok(res, 'Profile verified and now visible to sponsors');
   }
 
+  // PATCH /api/admin/students/:id/verification — unified decision endpoint expected by frontend
+  @Patch('students/:id/verification')
+  async updateVerification(
+    @CurrentUser() admin: AuthUser,
+    @Param('id') studentId: string,
+    @Body(new ZodValidationPipe(updateVerificationSchema))
+    dto: UpdateVerificationInput,
+  ) {
+    const res = await this.admin.updateStudentVerification(
+      admin.userId,
+      studentId,
+      dto.status,
+      dto.reason,
+    );
+    return ok(res.data, res.message);
+  }
+
   // POST /api/admin/reject/:id
   @Post('reject/:id')
   async reject(
@@ -103,14 +124,50 @@ export class AdminController {
     return ok(res, 'Account suspended');
   }
 
-  // GET /api/admin/transactions?filters
+  // GET /api/admin/transactions?filters (supports JSON and CSV export)
   @Get('transactions')
   async transactions(
     @Query(new ZodValidationPipe(transactionsQuerySchema))
     query: TransactionsQuery,
+    @Res() res: Response,
   ) {
-    const { rows, totalAmount, meta } = await this.admin.transactions(query);
-    return ok({ transactions: rows, totalAmount }, undefined, meta);
+    const { rows, totalAmount, meta, csv } =
+      await this.admin.transactions(query);
+
+    if (
+      query.format === 'csv' ||
+      query.export === 'csv' ||
+      query.export === 'true' ||
+      query.export === true
+    ) {
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="transactions.csv"',
+      );
+      return res.send(csv);
+    }
+
+    return res.json(ok({ transactions: rows, totalAmount }, undefined, meta));
+  }
+
+  // GET /api/admin/transactions/export — explicit CSV download route
+  @Get('transactions/export')
+  async exportTransactions(
+    @Query(new ZodValidationPipe(transactionsQuerySchema))
+    query: TransactionsQuery,
+    @Res() res: Response,
+  ) {
+    const { csv } = await this.admin.transactions({
+      ...query,
+      format: 'csv',
+    });
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="transactions.csv"',
+    );
+    return res.send(csv);
   }
 
   // GET /api/admin/reports

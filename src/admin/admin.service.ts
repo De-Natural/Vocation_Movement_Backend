@@ -80,15 +80,54 @@ export class AdminService {
     return { count: queue.length, students: queue };
   }
 
-  private async requireProfile(religiousId: string) {
-    const profile = await this.prisma.religiousProfile.findUnique({
-      where: { id: religiousId },
+  private async requireProfile(identifier: string) {
+    const profile = await this.prisma.religiousProfile.findFirst({
+      where: {
+        OR: [
+          { id: identifier },
+          { userId: identifier },
+          { slug: identifier },
+        ],
+      },
       include: { user: true },
     });
     if (!profile) {
       throw AppException.notFound('Student not found', 'STUDENT_NOT_FOUND');
     }
     return profile;
+  }
+
+  /** Unified verification decision method (PATCH /admin/students/:id/verification). */
+  async updateStudentVerification(
+    adminUserId: string,
+    identifier: string,
+    status?: string,
+    reason?: string,
+  ) {
+    const profile = await this.requireProfile(identifier);
+    const norm = (status ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+
+    if (norm === 'verified') {
+      const res = await this.verify(adminUserId, profile.id);
+      return { data: res, message: 'Profile verified and now visible to sponsors' };
+    }
+    if (norm === 'rejected') {
+      const res = await this.reject(adminUserId, profile.id, reason ?? 'Profile rejected');
+      return { data: res, message: 'Profile rejected — the student has been notified' };
+    }
+    if (
+      norm === 'requestinfo' ||
+      norm === 'pendingverification' ||
+      norm === 'pending'
+    ) {
+      const res = await this.requestInfo(
+        adminUserId,
+        profile.id,
+        reason ?? 'More information required',
+      );
+      return { data: res, message: 'Information request sent to the student' };
+    }
+    throw AppException.badRequest(`Unsupported verification status: ${status}`, 'INVALID_STATUS');
   }
 
   /** Approve a profile → Verified + isApproved, making it public. */
@@ -252,6 +291,7 @@ export class AdminService {
     rows: TransactionRow[];
     totalAmount: number;
     meta: PaginationMeta;
+    csv: string;
   }> {
     const where: Prisma.PaymentWhereInput = {};
 
@@ -279,6 +319,35 @@ export class AdminService {
       }
     }
 
+    const amountFilter: Prisma.IntFilter = {};
+    if (query.minAmount !== undefined && query.minAmount !== '') {
+      amountFilter.gte = Math.round(Number(query.minAmount) * 100);
+    }
+    if (query.maxAmount !== undefined && query.maxAmount !== '') {
+      amountFilter.lte = Math.round(Number(query.maxAmount) * 100);
+    }
+    if (query.amountRange) {
+      const parts = query.amountRange.split('-').map((s) => s.trim());
+      if (parts.length === 2) {
+        const min = parseFloat(parts[0]);
+        const max = parseFloat(parts[1]);
+        if (!isNaN(min)) amountFilter.gte = Math.round(min * 100);
+        if (!isNaN(max)) amountFilter.lte = Math.round(max * 100);
+      } else if (query.amountRange.endsWith('+')) {
+        const min = parseFloat(query.amountRange.replace('+', '').trim());
+        if (!isNaN(min)) amountFilter.gte = Math.round(min * 100);
+      }
+    }
+    if (Object.keys(amountFilter).length > 0) {
+      where.amountCents = amountFilter;
+    }
+
+    const isCsv =
+      query.format === 'csv' ||
+      query.export === 'csv' ||
+      query.export === 'true' ||
+      query.export === true;
+
     const { page, perPage, skip, take } = parsePagination(
       query.page,
       query.perPage,
@@ -293,8 +362,7 @@ export class AdminService {
           splits: { include: { bill: true } },
         },
         orderBy: { createdAt: 'desc' },
-        skip,
-        take,
+        ...(isCsv ? { take: 5000, skip: 0 } : { skip, take }),
       }),
       this.prisma.payment.count({ where }),
       this.prisma.payment.aggregate({ _sum: { amountCents: true }, where }),
@@ -325,6 +393,7 @@ export class AdminService {
       rows,
       totalAmount: centsToUnits(sumAgg._sum.amountCents ?? 0),
       meta: paginationMeta(page, perPage, total),
+      csv: transactionsToCsv(rows),
     };
   }
 
@@ -558,4 +627,47 @@ export interface TransactionRow {
   transactionId: string;
   status: 'Confirmed' | 'Pending' | 'Failed';
   recurring: boolean;
+}
+
+function escapeCsv(val: unknown): string {
+  const str = String(val ?? '');
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+export function transactionsToCsv(rows: TransactionRow[]): string {
+  const headers = [
+    'Transaction ID',
+    'Date',
+    'Donor Name',
+    'Anonymous',
+    'Student Name',
+    'Congregation',
+    'Bill',
+    'Amount',
+    'Currency',
+    'Status',
+    'Recurring',
+  ];
+  const lines = [headers.join(',')];
+  for (const r of rows) {
+    lines.push(
+      [
+        escapeCsv(r.transactionId),
+        escapeCsv(r.date),
+        escapeCsv(r.donorName),
+        escapeCsv(r.anonymous ? 'Yes' : 'No'),
+        escapeCsv(r.studentName),
+        escapeCsv(r.congregation),
+        escapeCsv(r.billName),
+        escapeCsv(r.amount),
+        escapeCsv(r.currency),
+        escapeCsv(r.status),
+        escapeCsv(r.recurring ? 'Yes' : 'No'),
+      ].join(','),
+    );
+  }
+  return lines.join('\n');
 }

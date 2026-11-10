@@ -31,11 +31,11 @@ import {
   UpsertReligiousProfileInput,
 } from './religious.dto';
 
-@Controller('religious')
+@Controller(['religious', 'students'])
 export class ReligiousController {
   constructor(private readonly religious: ReligiousService) {}
 
-  // GET /api/religious  — public browse/search (verified only)
+  // GET /api/students or /api/religious — public browse/search (verified only)
   @Public()
   @Get()
   async list(
@@ -46,20 +46,50 @@ export class ReligiousController {
     return ok(students, undefined, meta);
   }
 
-  // GET /api/religious/me/dashboard — student's own dashboard
+  // GET /api/students/me/dashboard or /api/religious/me/dashboard — student's own dashboard
   // NOTE: declared before ':id' so "me" is not captured as an id.
-  @Roles('RELIGIOUS')
+  @Roles('RELIGIOUS', 'ADMIN')
   @Get('me/dashboard')
   async dashboard(@CurrentUser() user: AuthUser) {
     const data = await this.religious.dashboard(user.userId);
     return ok(data);
   }
 
-  // GET /api/religious/me/payments — received contributions
-  @Roles('RELIGIOUS')
+  // GET /api/students/:id/dashboard — student dashboard by ID, slug, or user ID
+  @Roles('RELIGIOUS', 'ADMIN')
+  @Get(':id/dashboard')
+  async dashboardById(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+  ) {
+    const data = await this.religious.dashboardById(
+      id,
+      user.userId,
+      user.role === 'ADMIN',
+    );
+    return ok(data);
+  }
+
+  // GET /api/students/me/payments or /api/religious/me/payments — received contributions
+  @Roles('RELIGIOUS', 'ADMIN')
   @Get('me/payments')
   async myPayments(@CurrentUser() user: AuthUser) {
     const payments = await this.religious.receivedPayments(user.userId);
+    return ok(payments);
+  }
+
+  // GET /api/students/:id/payments — received contributions by ID, slug, or user ID
+  @Roles('RELIGIOUS', 'ADMIN')
+  @Get(':id/payments')
+  async paymentsById(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+  ) {
+    const payments = await this.religious.receivedPaymentsById(
+      id,
+      user.userId,
+      user.role === 'ADMIN',
+    );
     return ok(payments);
   }
 

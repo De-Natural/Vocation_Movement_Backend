@@ -43,14 +43,26 @@ export class BillsService {
   }
 
   // ─────────────────── List a student's bills (public) ───────────────────
-  /** GET /api/bills/religious/:id — non-archived bills for a student. */
+  /** GET /api/bills?studentId=:id or /api/bills/religious/:id — non-archived bills for a student. */
   async listForReligious(
-    religiousId: string,
+    identifier: string,
     opts: { includeArchived?: boolean; viewerIsAdmin?: boolean } = {},
   ): Promise<Bill[]> {
+    const profile = await this.prisma.religiousProfile.findFirst({
+      where: {
+        OR: [
+          { id: identifier },
+          { userId: identifier },
+          { slug: identifier },
+        ],
+      },
+      select: { id: true },
+    });
+    const resolvedReligiousId = profile?.id ?? identifier;
+
     const bills = await this.prisma.bill.findMany({
       where: {
-        religiousId,
+        religiousId: resolvedReligiousId,
         ...(opts.includeArchived ? {} : { status: { not: 'ARCHIVED' } }),
       },
       include: billInclude,
@@ -59,6 +71,20 @@ export class BillsService {
     return bills.map((b) =>
       serializeBill(b, { viewerIsAdmin: opts.viewerIsAdmin }),
     );
+  }
+
+  /** List active bills across all verified students. */
+  async listAllActive(): Promise<Bill[]> {
+    const bills = await this.prisma.bill.findMany({
+      where: {
+        status: { not: 'ARCHIVED' },
+        religious: { verificationState: 'VERIFIED' },
+      },
+      include: billInclude,
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    return bills.map((b) => serializeBill(b));
   }
 
   // ─────────────────── Get one bill ───────────────────
@@ -162,6 +188,34 @@ export class BillsService {
     });
 
     return this.getOne(billId, { viewerIsAdmin: true });
+  }
+
+  // ─────────────────── Delete / Remove (owner only) ───────────────────
+  /** DELETE /api/bills/:id — physically deletes if unbacked, soft-archives if payments exist. */
+  async remove(
+    userId: string,
+    billId: string,
+  ): Promise<{ id: string; deleted: boolean; archived?: boolean }> {
+    const religiousId = await this.ownProfileId(userId);
+    const bill = await this.prisma.bill.findUnique({
+      where: { id: billId },
+      include: { paymentSplits: true },
+    });
+    if (!bill || bill.religiousId !== religiousId) {
+      throw AppException.notFound('Bill not found', 'BILL_NOT_FOUND');
+    }
+
+    if (bill.paymentSplits.length === 0) {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.bill.delete({ where: { id: billId } });
+        await this.aggregation.recomputeReligiousAggregates(religiousId, tx);
+      });
+      return { id: billId, deleted: true, archived: false };
+    }
+
+    // Retain transaction history by archiving
+    await this.archive(userId, billId);
+    return { id: billId, deleted: true, archived: true };
   }
 
   // ─────────────────── Contributions for a bill ───────────────────
