@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Role, User } from '@prisma/client';
+import { Prisma, Role, User } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.module';
@@ -15,10 +15,17 @@ import {
   RegisterInput,
   ResetPasswordInput,
 } from './auth.dto';
+import { isStaff } from '../common/auth/staff';
+import { SettingsService } from '../settings/settings.service';
+import { MAINTENANCE_MESSAGE } from '../common/auth/maintenance.guard';
 
 const BCRYPT_COST = 12; // PRD §5.2
 const EMAIL_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h verify
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h reset
+
+export type UserWithProfiles = Prisma.UserGetPayload<{
+  include: { religiousProfile: true; sponsorProfile: true };
+}>;
 
 export interface AuthTokens {
   accessToken: string;
@@ -33,6 +40,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly tokens: TokenService,
     private readonly notifications: NotificationsService,
+    private readonly settings: SettingsService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -46,6 +54,7 @@ export class AuthService {
 
     const role = roleFromApi[input.role]; // 'student'|'sponsor' → RELIGIOUS|SPONSOR
     const passwordHash = await bcrypt.hash(input.password, BCRYPT_COST);
+    const { anonymousDefault } = await this.settings.effective();
 
     const user = await this.prisma.$transaction(async (tx) => {
       const created = await tx.user.create({
@@ -87,6 +96,8 @@ export class AuthService {
             fullName: input.fullName,
             country: input.country ?? '',
             currency: this.config.defaults.currency,
+            // Platform default (admin setting); the sponsor can change it later.
+            anonymousByDefault: anonymousDefault,
           },
         });
       }
@@ -105,9 +116,12 @@ export class AuthService {
   }
 
   // ─────────────────────────── Login ───────────────────────────
-  async login(input: LoginInput): Promise<{ user: User; tokens: AuthTokens }> {
+  async login(input: LoginInput): Promise<{ user: UserWithProfiles; tokens: AuthTokens }> {
     const email = input.email.toLowerCase().trim();
-    const user = await this.prisma.user.findUnique({ where: { email } });
+    const user = await this.prisma.user.findUnique({
+      where: { email },
+      include: { religiousProfile: true, sponsorProfile: true },
+    });
 
     // Constant-ish message to avoid leaking which emails exist.
     if (!user || !(await bcrypt.compare(input.password, user.passwordHash))) {
@@ -116,20 +130,34 @@ export class AuthService {
     if (user.isSuspended) {
       throw AppException.forbidden('This account has been suspended', 'ACCOUNT_SUSPENDED');
     }
-    // If the sign-in page sent a role tab, it must match.
-    if (input.role && roleFromApi[input.role] !== user.role) {
+    // If the sign-in page sent a role tab, it must match. Staff share the
+    // "admin" tab, so a super-admin may sign in from it too.
+    const tabRole = input.role ? roleFromApi[input.role] : undefined;
+    const tabMatches =
+      !tabRole ||
+      tabRole === user.role ||
+      (isStaff(tabRole) && isStaff(user.role));
+    if (!tabMatches) {
       throw AppException.forbidden(
         'This account is not registered for the selected role',
         'ROLE_MISMATCH',
       );
     }
 
+    if (!isStaff(user.role) && (await this.settings.effective()).maintenanceMode) {
+      throw AppException.serviceUnavailable(MAINTENANCE_MESSAGE, 'MAINTENANCE_MODE');
+    }
+
     const tokens = await this.issueTokens(user);
+    // "Last active" for staff monitoring (best effort).
+    await this.prisma.user
+      .update({ where: { id: user.id }, data: { lastLoginAt: new Date() } })
+      .catch(() => undefined);
     return { user, tokens };
   }
 
   // ─────────────────────────── Refresh ───────────────────────────
-  async refresh(rawRefreshToken: string): Promise<AuthTokens> {
+  async refresh(rawRefreshToken: string): Promise<AuthTokens & { role: Role }> {
     const { userId, refreshToken } =
       await this.tokens.rotateRefreshToken(rawRefreshToken);
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
@@ -137,7 +165,7 @@ export class AuthService {
       throw AppException.unauthorized('Account no longer active');
     }
     const accessToken = await this.tokens.signAccessToken(user);
-    return { accessToken, refreshToken };
+    return { accessToken, refreshToken, role: user.role };
   }
 
   // ─────────────────────────── Logout ───────────────────────────
@@ -168,6 +196,66 @@ export class AuthService {
         data: { usedAt: new Date() },
       }),
     ]);
+    await this.autoApproveIfEnabled(record.userId);
+  }
+
+  /**
+   * Auto-approve (Super-Admin setting, off by default). Normally every student
+   * is reviewed one by one by an admin. Only while the Super-Admin has
+   * auto-approve switched on does a student whose profile is still pending go
+   * live as soon as they verify their email (registration + document uploads
+   * are done by then). The approval is written to the activity log as a system
+   * action so staff can see which profiles were never reviewed by a person.
+   */
+  private async autoApproveIfEnabled(userId: string): Promise<void> {
+    const { autoApprove } = await this.settings.effective();
+    if (!autoApprove) return;
+    const profile = await this.prisma.religiousProfile.findUnique({
+      where: { userId },
+      include: { user: { select: { email: true, isSuspended: true } } },
+    });
+    if (!profile || profile.verificationState !== 'PENDING' || profile.user.isSuspended) return;
+
+    await this.prisma.$transaction([
+      this.prisma.religiousProfile.update({
+        where: { id: profile.id },
+        data: { verificationState: 'VERIFIED', rejectionReason: null },
+      }),
+      this.prisma.user.update({ where: { id: userId }, data: { isApproved: true } }),
+      this.prisma.adminAction.create({
+        data: {
+          actorId: null,
+          actorLabel: 'Auto-approve (system)',
+          targetUserId: userId,
+          targetLabel: profile.fullName,
+          action: 'VERIFY_PROFILE',
+          reason: 'Auto-approve was switched on by the Super-Admin',
+        },
+      }),
+    ]);
+
+    await this.notifications.notify({
+      userId,
+      type: 'PROFILE_APPROVED',
+      title: 'Your profile is verified',
+      body: 'Your profile is now live and visible to sponsors. Thank you!',
+    });
+    await this.notifications.sendEmail({
+      to: profile.user.email,
+      template: 'profile-approved',
+      subject: 'Your Vocation Movement profile is verified',
+      data: { name: profile.fullName },
+    });
+  }
+
+  // ─────────────────────────── Resend verification ───────────────────────────
+  async resendVerification(rawEmail: string): Promise<void> {
+    const email = rawEmail.toLowerCase().trim();
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    // Succeed silently for unknown or already-verified emails — never reveal
+    // which addresses have accounts.
+    if (!user || user.isVerified) return;
+    await this.sendVerificationEmail(user);
   }
 
   // ─────────────────────────── Forgot / reset ───────────────────────────
@@ -247,7 +335,9 @@ export class AuthService {
         expires: new Date(Date.now() + EMAIL_TOKEN_TTL_MS),
       },
     });
-    const link = `${this.config.apiUrl}/api/auth/verify-email/${token}`;
+    // Link to the frontend page, which calls GET /api/auth/verify-email/:token
+    // and shows the result (the raw API URL would only render JSON).
+    const link = `${this.config.frontendUrl}/verify-email?token=${token}`;
     await this.notifications.sendEmail({
       to: user.email,
       template: 'email-verify',
@@ -258,7 +348,7 @@ export class AuthService {
 
   private async notifyAdminsNewSubmission(studentName: string): Promise<void> {
     const admins = await this.prisma.user.findMany({
-      where: { role: 'ADMIN' },
+      where: { role: { in: ['ADMIN', 'SUPERADMIN'] }, isSuspended: false },
       select: { id: true, email: true },
     });
     await Promise.all(

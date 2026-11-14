@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { SettingsService } from './settings.service';
+import { SettingsController } from './settings.controller';
 
 /**
  * Global settings module. Exposes the shared {@link SettingsService} reader
@@ -9,6 +10,7 @@ import { SettingsService } from './settings.service';
  */
 @Global()
 @Module({
+  controllers: [SettingsController],
   providers: [SettingsService],
   exports: [SettingsService],
 })

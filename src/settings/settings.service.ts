@@ -41,6 +41,19 @@ export interface FeeBreakdown {
  */
 @Injectable()
 export class SettingsService {
+  /**
+   * Short-lived cache: the maintenance guard reads settings on every request.
+   * The admin writer calls `invalidate()` so changes apply immediately on this
+   * instance (and within CACHE_MS on any other instance).
+   */
+  private cache: { value: EffectiveSettings; at: number } | null = null;
+  private static readonly CACHE_MS = 5_000;
+
+  /** Drop the cached settings (call after writing PlatformSettings). */
+  invalidate(): void {
+    this.cache = null;
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -52,6 +65,15 @@ export class SettingsService {
    * row or column never throws.
    */
   async effective(): Promise<EffectiveSettings> {
+    if (this.cache && Date.now() - this.cache.at < SettingsService.CACHE_MS) {
+      return this.cache.value;
+    }
+    const value = await this.read();
+    this.cache = { value, at: Date.now() };
+    return value;
+  }
+
+  private async read(): Promise<EffectiveSettings> {
     const row = await this.prisma.platformSettings.findUnique({
       where: { id: 'singleton' },
     });
@@ -76,8 +98,8 @@ export class SettingsService {
    *
    * `feeCents = round(gift × fee%)`, clamped to `[0, gift]`;
    * `chargeCents = gift`; `netCents = gift − feeCents`.
-   * With `feePercent = 0` (the default) the fee is 0 and `net == gross`, so
-   * existing/seeded numbers are unchanged.
+   * The default is 5% (platform upkeep); the Super-Admin can change it. With
+   * `feePercent = 0` the fee is 0 and `net == gross`.
    */
   computeFee(giftCents: number, feePercent: number): FeeBreakdown {
     const pct =

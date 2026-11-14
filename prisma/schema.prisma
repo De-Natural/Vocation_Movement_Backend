@@ -25,6 +25,9 @@ enum Role {
   RELIGIOUS
   SPONSOR
   ADMIN
+  /// Oversees the whole platform: every ADMIN power plus managing admins,
+  /// maintenance mode, minimum gift and the platform commission.
+  SUPERADMIN
 }
 
 enum Stage {
@@ -102,6 +105,8 @@ enum AdminActionType {
   UNSUSPEND_USER
   UPDATE_SETTINGS
   DELETE_INQUIRY
+  CREATE_ADMIN
+  DELETE_ADMIN
 }
 
 enum InquiryStatus {
@@ -121,6 +126,10 @@ model User {
   isVerified   Boolean @default(false) // email verified
   isApproved   Boolean @default(false) // admin approved (students only)
   isSuspended  Boolean @default(false)
+
+  /// Display name for staff accounts (students/sponsors keep theirs on the profile).
+  name        String?
+  lastLoginAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -372,11 +381,15 @@ model Notification {
 /// Audit log of all admin operations (verify, suspend, flag).
 model AdminAction {
   id      String @id @default(cuid())
-  actorId String
-  actor   User   @relation("AdminActor", fields: [actorId], references: [id])
+  /// Null once the acting admin has been deleted — see actorLabel.
+  actorId    String?
+  actor      User?   @relation("AdminActor", fields: [actorId], references: [id], onDelete: SetNull)
+  /// Snapshot shown in the audit log after the actor is deleted, e.g. "Jane Doe (deleted)".
+  actorLabel String?
 
   targetUserId String?
-  targetUser   User?   @relation("AdminTarget", fields: [targetUserId], references: [id])
+  targetUser   User?   @relation("AdminTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+  targetLabel  String?
 
   action AdminActionType
   reason String?
@@ -459,7 +472,7 @@ model PlatformSettings {
   organizationName  String  @default("Vocation Movement")
   supportEmail      String  @default("support@vocationmovement.org")
   defaultCurrency   String  @default("USD")
-  platformFeePercent Float  @default(0)
+  platformFeePercent Float  @default(5) // % of each gift kept for platform upkeep; Super-Admin can change it
   minGiftCents      Int     @default(100)
   autoApprove       Boolean @default(false)
   maintenanceMode   Boolean @default(false)

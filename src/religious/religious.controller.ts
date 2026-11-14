@@ -30,6 +30,7 @@ import {
   upsertReligiousProfileSchema,
   UpsertReligiousProfileInput,
 } from './religious.dto';
+import { isStaff } from '../common/auth/staff';
 
 @Controller(['religious', 'students'])
 export class ReligiousController {
@@ -65,7 +66,7 @@ export class ReligiousController {
     const data = await this.religious.dashboardById(
       id,
       user.userId,
-      user.role === 'ADMIN',
+      isStaff(user.role),
     );
     return ok(data);
   }
@@ -88,7 +89,7 @@ export class ReligiousController {
     const payments = await this.religious.receivedPaymentsById(
       id,
       user.userId,
-      user.role === 'ADMIN',
+      isStaff(user.role),
     );
     return ok(payments);
   }

@@ -28,6 +28,17 @@ async function bootstrap(): Promise<void> {
   const config = app.get<AppConfig>(APP_CONFIG);
   const logger = new Logger('Bootstrap');
 
+  // The frontend proxies /api/* through Next.js, so requests arrive from
+  // that server. Trusting it lets req.ip come from X-Forwarded-For, which
+  // keeps the per-IP rate limits per client instead of one shared bucket.
+  // Default "loopback" covers a local Next dev server; in production set
+  // TRUST_PROXY to the number of proxy hops (e.g. 1 or 2) or a subnet list.
+  const trustProxy = process.env.TRUST_PROXY ?? 'loopback';
+  app.set(
+    'trust proxy',
+    /^\d+$/.test(trustProxy) ? parseInt(trustProxy, 10) : trustProxy,
+  );
+
   // Security headers. crossOriginResourcePolicy is relaxed so the frontend
   // (a different origin) can load uploaded images served from /storage.
   app.use(

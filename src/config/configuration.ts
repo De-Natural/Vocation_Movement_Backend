@@ -153,7 +153,7 @@ export function loadConfig(): AppConfig {
     defaults: {
       currency: process.env.DEFAULT_CURRENCY ?? 'USD',
       minGiftCents: parseInt(process.env.MIN_GIFT_CENTS ?? '100', 10),
-      platformFeePercent: parseFloat(process.env.PLATFORM_FEE_PERCENT ?? '0'),
+      platformFeePercent: parseFloat(process.env.PLATFORM_FEE_PERCENT ?? '5'),
     },
 
     clock: {

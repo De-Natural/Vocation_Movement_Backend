@@ -27,8 +27,9 @@ export class ZodValidationPipe implements PipeTransform {
 }
 
 function formatZodError(error: ZodError): Array<{ path: string; message: string }> {
-  return error.errors.map((e) => ({
-    path: e.path.join('.'),
+  // `.issues` works in Zod 3 and 4 (`.errors` was removed in v4).
+  return error.issues.map((e) => ({
+    path: e.path.map(String).join('.'),
     message: e.message,
   }));
 }

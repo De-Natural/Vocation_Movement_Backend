@@ -198,7 +198,7 @@ export class AdminController {
     @CurrentUser() admin: AuthUser,
     @Body(new ZodValidationPipe(updateSettingsSchema)) dto: UpdateSettingsInput,
   ) {
-    const res = await this.admin.updateSettings(admin.userId, dto);
+    const res = await this.admin.updateSettings(admin.userId, dto, admin.role);
     return ok(res, 'Platform settings saved');
   }
 }
