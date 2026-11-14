@@ -17,6 +17,7 @@ import { AuthModule } from './auth/auth.module';
 import { ReligiousModule } from './religious/religious.module';
 import { BillsModule } from './bills/bills.module';
 import { AdminModule } from './admin/admin.module';
+import { SuperAdminModule } from './superadmin/superadmin.module';
 import { PaymentsModule } from './payments/payments.module';
 import { SponsorsModule } from './sponsors/sponsors.module';
 import { MessagesModule } from './messages/messages.module';
@@ -27,6 +28,7 @@ import { JobsModule } from './jobs/jobs.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
 import { RolesGuard } from './common/auth/roles.guard';
 import { RateLimitGuard } from './common/auth/rate-limit.guard';
+import { MaintenanceGuard } from './common/auth/maintenance.guard';
 import { ResponseInterceptor } from './common/http/response.interceptor';
 import { AllExceptionsFilter } from './common/http/all-exceptions.filter';
 
@@ -35,8 +37,9 @@ import { AllExceptionsFilter } from './common/http/all-exceptions.filter';
  *
  * The three global guards run in the order they are registered:
  *   1. JwtAuthGuard   — authenticates the Bearer token (skips @Public)
- *   2. RolesGuard     — enforces @Roles(...) role checks
- *   3. RateLimitGuard — applies @RateLimit(...) Redis counters
+ *   2. MaintenanceGuard — 503 for non-staff while maintenance mode is on
+ *   3. RolesGuard     — enforces @Roles(...) role checks
+ *   4. RateLimitGuard — applies @RateLimit(...) Redis counters
  * The ResponseInterceptor wraps every result in the success envelope and
  * the AllExceptionsFilter renders every error into the error envelope.
  *
@@ -61,6 +64,7 @@ import { AllExceptionsFilter } from './common/http/all-exceptions.filter';
     ReligiousModule,
     BillsModule,
     AdminModule,
+    SuperAdminModule,
     PaymentsModule,
     SponsorsModule,
     MessagesModule,
@@ -69,6 +73,7 @@ import { AllExceptionsFilter } from './common/http/all-exceptions.filter';
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: MaintenanceGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: RateLimitGuard },
     { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },

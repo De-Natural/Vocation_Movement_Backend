@@ -7,7 +7,7 @@
  * serializers in this folder convert DB records into these shapes.
  */
 
-export type UserRole = 'student' | 'sponsor' | 'admin';
+export type UserRole = 'student' | 'sponsor' | 'admin' | 'superadmin';
 
 export type FormationStage = 'Seminarian' | 'Novice' | 'Postulant';
 
@@ -31,6 +31,8 @@ export type VerificationStatus =
 
 export interface Contribution {
   id: string;
+  /** Parent payment id (a payment may be split across bills). */
+  paymentId?: string;
   billId: string;
   donorName: string; // "Anonymous" when anonymous
   anonymous: boolean;

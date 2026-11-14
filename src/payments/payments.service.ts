@@ -26,6 +26,7 @@ import {
   ConfirmInputDto,
   RecurringInputDto,
 } from './payments.dto';
+import { isStaff } from '../common/auth/staff';
 
 // Frontend payment-method label → DB Gateway enum.
 const methodToGateway: Record<'card' | 'paystack', Gateway> = {
@@ -58,8 +59,8 @@ export class PaymentsService {
   /**
    * Fee Model A breakdown for a gift, using the current effective platform
    * fee %. Returns the platform fee and the net credited to the bill; the
-   * sponsor is still charged the full `amountCents` (gross). With fee% = 0
-   * (the default) feeCents is 0 and netAmountCents == amountCents.
+   * sponsor is still charged the full `amountCents` (gross). The default fee
+   * is 5%; with fee% = 0, feeCents is 0 and netAmountCents == amountCents.
    */
   private async feeFor(
     amountCents: number,
@@ -70,6 +71,17 @@ export class PaymentsService {
       platformFeePercent,
     );
     return { feeCents, netAmountCents: netCents };
+  }
+
+  /** Reject gifts below the platform minimum set by the Super-Admin. */
+  private async assertMinGift(amountCents: number): Promise<void> {
+    const { minGiftCents, defaultCurrency } = await this.settings.effective();
+    if (amountCents < minGiftCents) {
+      throw AppException.unprocessable(
+        `The minimum gift is ${defaultCurrency} ${centsToUnits(minGiftCents).toFixed(2)}.`,
+        'GIFT_BELOW_MINIMUM',
+      );
+    }
   }
 
   /** Resolve the SponsorProfile (+user email) owned by a user. */
@@ -122,6 +134,7 @@ export class PaymentsService {
 
     const gateway = methodToGateway[dto.method];
     const amountCents = unitsToCents(dto.amount);
+    await this.assertMinGift(amountCents);
     const currency = sponsor.currency || this.config.defaults.currency;
     const isAnonymous = dto.anonymous ?? sponsor.anonymousByDefault;
     const { feeCents, netAmountCents } = await this.feeFor(amountCents);
@@ -193,14 +206,28 @@ export class PaymentsService {
     if (this.config.providerMode === 'stub') {
       const gw = this.gatewayFor(payment.gateway);
       if (gw instanceof StubGateway) {
+        const declined = dto.simulate === 'decline';
         const { body, signature } = gw.buildTestWebhook({
-          type: 'payment.succeeded',
+          type: declined ? 'payment.failed' : 'payment.succeeded',
           gatewayTxId: payment.gatewayTxId,
           paymentId: payment.id,
           amountCents: payment.amountCents,
           currency: payment.currency,
         });
         await this.handleWebhook(payment.gateway, Buffer.from(body), signature);
+        // A monthly sponsorship whose very first charge is declined never
+        // started — cancel it so it doesn't show as an active commitment.
+        if (declined && payment.sponsorshipId) {
+          const confirmedBefore = await this.prisma.payment.count({
+            where: { sponsorshipId: payment.sponsorshipId, status: 'CONFIRMED' },
+          });
+          if (confirmedBefore === 0) {
+            await this.prisma.sponsorship.update({
+              where: { id: payment.sponsorshipId },
+              data: { status: 'CANCELLED' },
+            });
+          }
+        }
       }
     }
 
@@ -227,6 +254,7 @@ export class PaymentsService {
 
     const gateway = methodToGateway[dto.method];
     const amountCents = unitsToCents(dto.amount);
+    await this.assertMinGift(amountCents);
     const currency = sponsor.currency || this.config.defaults.currency;
     const isAnonymous = dto.anonymous ?? sponsor.anonymousByDefault;
     const { feeCents, netAmountCents } = await this.feeFor(amountCents);
@@ -450,7 +478,7 @@ export class PaymentsService {
       where: { id: payment.id },
       data: {
         status: 'FAILED',
-        failureReason: 'Payment failed at the gateway',
+        failureReason: 'Card declined by the payment provider',
       },
     });
 
@@ -631,7 +659,7 @@ export class PaymentsService {
       throw AppException.notFound('Payment not found', 'PAYMENT_NOT_FOUND');
     }
 
-    const isAdmin = user.role === 'ADMIN';
+    const isAdmin = isStaff(user.role);
     const isOwner = payment.sponsor.userId === user.userId; // sponsor who paid
     if (!isAdmin && !isOwner) {
       throw AppException.forbidden(

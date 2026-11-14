@@ -37,8 +37,9 @@ export type RegisterInput = z.infer<typeof registerSchema>;
 export const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
-  // Optional expected role tab from the sign-in page (student/sponsor/admin)
-  role: z.enum(['student', 'sponsor', 'admin']).optional(),
+  // Optional expected role tab from the sign-in page (student/sponsor/admin).
+  // The "admin" tab is shared by admins and super-admins.
+  role: z.enum(['student', 'sponsor', 'admin', 'superadmin']).optional(),
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 
@@ -51,6 +52,11 @@ export const forgotPasswordSchema = z.object({
   email: z.string().email(),
 });
 export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
+
+export const resendVerificationSchema = z.object({
+  email: z.string().email(),
+});
+export type ResendVerificationInput = z.infer<typeof resendVerificationSchema>;
 
 export const resetPasswordSchema = z.object({
   token: z.string().min(10),

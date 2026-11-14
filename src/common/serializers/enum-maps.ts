@@ -25,11 +25,13 @@ export const roleToApi: Record<Role, UserRole> = {
   RELIGIOUS: 'student',
   SPONSOR: 'sponsor',
   ADMIN: 'admin',
+  SUPERADMIN: 'superadmin',
 };
 export const roleFromApi: Record<UserRole, Role> = {
   student: 'RELIGIOUS',
   sponsor: 'SPONSOR',
   admin: 'ADMIN',
+  superadmin: 'SUPERADMIN',
 };
 
 // ─── Formation stage ───

@@ -46,6 +46,10 @@ export class AppException extends HttpException {
     return new AppException(code, message, HttpStatus.UNPROCESSABLE_ENTITY);
   }
 
+  static serviceUnavailable(message: string, code = 'SERVICE_UNAVAILABLE') {
+    return new AppException(code, message, HttpStatus.SERVICE_UNAVAILABLE);
+  }
+
   static tooManyRequests(message = 'Too many requests', code = 'RATE_LIMITED') {
     return new AppException(code, message, HttpStatus.TOO_MANY_REQUESTS);
   }

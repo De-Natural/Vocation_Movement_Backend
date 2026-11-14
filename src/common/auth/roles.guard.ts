@@ -5,11 +5,14 @@ import { Request } from 'express';
 import { AppException } from '../http/app-exception';
 import { ROLES_KEY } from './decorators';
 import { AuthUser } from './jwt-payload';
+import { isSuperAdmin } from './staff';
 
 /**
  * Enforces @Roles(...) on a route. Runs after JwtAuthGuard, so
  * `req.user` is already populated. A suspended-user check is included
  * here since every authenticated route should reject suspended accounts.
+ *
+ * SUPERADMIN inherits every ADMIN route, so @Roles('ADMIN') also admits it.
  */
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -27,7 +30,10 @@ export class RolesGuard implements CanActivate {
     if (!user) {
       throw AppException.unauthorized();
     }
-    if (!required.includes(user.role)) {
+    const allowed =
+      required.includes(user.role) ||
+      (isSuperAdmin(user.role) && required.includes('ADMIN'));
+    if (!allowed) {
       throw AppException.forbidden(
         'Your account role does not have access to this resource',
       );

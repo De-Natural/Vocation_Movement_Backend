@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Prisma, VerificationState } from '@prisma/client';
+import { Prisma, Role, VerificationState } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.module';
 import { NotificationsService } from '../notifications/notifications.module';
 import { UploadsService } from '../uploads/uploads.service';
@@ -17,6 +17,20 @@ import {
   TransactionsQuery,
   UpdateSettingsInput,
 } from './admin.dto';
+import { isStaff, isSuperAdmin } from '../common/auth/staff';
+import { SettingsService } from '../settings/settings.service';
+
+/**
+ * Settings only a SUPERADMIN may change (PATCH /admin/settings). Auto-approve
+ * is here because admins are expected to review each student one by one; only
+ * the Super-Admin may switch that review off.
+ */
+export const SUPERADMIN_ONLY_SETTINGS = [
+  'autoApprove',
+  'maintenanceMode',
+  'minGift',
+  'platformFeePercent',
+] as const;
 
 const SETTINGS_ID = 'singleton';
 
@@ -38,6 +52,7 @@ export class AdminService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly uploads: UploadsService,
+    private readonly settingsReader: SettingsService,
   ) {}
 
   // ═══════════════════ Verification workflow (§7.5) ═══════════════════
@@ -69,7 +84,8 @@ export class AdminService {
             createdAt: d.createdAt.toISOString(),
           })),
         );
-        return { ...student, email: p.user.email, documents };
+        // userId is needed by POST /admin/suspend/:userId.
+        return { ...student, userId: p.userId, email: p.user.email, documents };
       }),
     );
   }
@@ -243,8 +259,9 @@ export class AdminService {
       include: { religiousProfile: true },
     });
     if (!user) throw AppException.notFound('User not found', 'USER_NOT_FOUND');
-    if (user.role === 'ADMIN') {
-      throw AppException.forbidden('Admins cannot be suspended', 'CANNOT_SUSPEND_ADMIN');
+    if (isStaff(user.role)) {
+      // Staff are managed by the super-admin (POST /superadmin/admins/:id/...).
+      throw AppException.forbidden('Admins cannot be suspended here', 'CANNOT_SUSPEND_ADMIN');
     }
 
     await this.prisma.$transaction(async (tx) => {
@@ -486,7 +503,26 @@ export class AdminService {
     return this.serializeSettings(settings);
   }
 
-  async updateSettings(adminUserId: string, dto: UpdateSettingsInput) {
+  async updateSettings(
+    adminUserId: string,
+    dto: UpdateSettingsInput,
+    actorRole: Role = 'ADMIN',
+  ) {
+    // Auto-approve, maintenance mode, minimum gift and the platform commission
+    // are super-admin only. Admins may resend them unchanged (the form posts every
+    // field) but not change them.
+    if (!isSuperAdmin(actorRole)) {
+      const current = await this.getSettings();
+      const changed = SUPERADMIN_ONLY_SETTINGS.filter(
+        (k) => dto[k] !== undefined && dto[k] !== current[k],
+      );
+      if (changed.length) {
+        throw AppException.forbidden(
+          `Only the Super-Admin can change: ${changed.join(', ')}`,
+          'SUPERADMIN_ONLY',
+        );
+      }
+    }
     const data: Prisma.PlatformSettingsUpdateInput = {};
     if (dto.organizationName !== undefined) data.organizationName = dto.organizationName;
     if (dto.supportEmail !== undefined) data.supportEmail = dto.supportEmail;
@@ -504,6 +540,7 @@ export class AdminService {
       create: { id: SETTINGS_ID, ...(data as Prisma.PlatformSettingsCreateInput) },
       update: data,
     });
+    this.settingsReader.invalidate();
 
     await this.prisma.adminAction.create({
       data: {
@@ -563,13 +600,17 @@ export class AdminService {
         raised: centsToUnits(g._sum.totalRaisedCents ?? 0),
         needed: centsToUnits(g._sum.totalNeededCents ?? 0),
       })),
-      generated: generated.map((r) => ({
-        id: r.id,
-        kind: r.kind,
-        title: r.title,
-        fileUrl: r.fileUrl,
-        createdAt: r.createdAt.toISOString(),
-      })),
+      generated: await Promise.all(
+        generated.map(async (r) => ({
+          id: r.id,
+          kind: r.kind,
+          title: r.title,
+          fileUrl: r.fileUrl,
+          // Signed so the admin UI can download it (private bucket).
+          url: await this.uploads.signedUrl(r.fileUrl),
+          createdAt: r.createdAt.toISOString(),
+        })),
+      ),
     };
   }
 

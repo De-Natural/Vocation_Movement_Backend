@@ -36,6 +36,9 @@ export type CreateIntentInputDto = z.infer<typeof createIntentSchema>;
 // this simply reports the current status.
 export const confirmSchema = z.object({
   paymentId: z.string().min(1),
+  // Stub mode only: the test-card outcome chosen on the mock checkout
+  // ("decline" = 4000 0000 0000 0002). Ignored in live mode.
+  simulate: z.enum(['success', 'decline']).default('success'),
 });
 export type ConfirmInputDto = z.infer<typeof confirmSchema>;
 

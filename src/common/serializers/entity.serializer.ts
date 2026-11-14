@@ -61,6 +61,8 @@ export function serializeContribution(
   );
   return {
     id: split.id,
+    // The parent payment — used to address a thank-you (POST /messages).
+    paymentId: p.id,
     billId: split.billId,
     donorName,
     anonymous: p.isAnonymous,
