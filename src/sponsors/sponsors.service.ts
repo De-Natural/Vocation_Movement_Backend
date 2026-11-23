@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { IncomingFile, UploadsService } from '../uploads/uploads.service';
 import { Gateway, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.module';
 import { AggregationService } from '../aggregation/aggregation.service';
@@ -50,6 +51,7 @@ export class SponsorsService {
     private readonly notifications: NotificationsService,
     @Inject(STRIPE_GATEWAY) private readonly stripe: PaymentGateway,
     @Inject(PAYSTACK_GATEWAY) private readonly paystack: PaymentGateway,
+    private readonly uploads: UploadsService,
   ) {}
 
   private gatewayFor(gateway: Gateway): PaymentGateway {
@@ -85,6 +87,14 @@ export class SponsorsService {
   async getOwnProfile(userId: string): Promise<Sponsor> {
     const sponsor = await this.requireOwnProfile(userId);
     return this.serializeWithAggregates(sponsor);
+  }
+
+  /** POST /api/sponsors/photo — store a profile picture. */
+  async uploadPhoto(userId: string, file: IncomingFile): Promise<Sponsor> {
+    const sponsor = await this.requireOwnProfile(userId);
+    const stored = await this.uploads.store('photos', file);
+    await this.prisma.sponsorProfile.update({ where: { id: sponsor.id }, data: { photoUrl: stored.url } });
+    return this.getOwnProfile(userId);
   }
 
   /** POST/PATCH /api/sponsors/profile — edit name/country/currency/anonymity. */
@@ -288,6 +298,8 @@ export class SponsorsService {
       ),
       anonymous: s.payment.isAnonymous,
       amount: centsToUnits(s.amountCents),
+      currency: s.payment.currency,
+      nairaAmount: s.nairaAmountCents === null ? null : centsToUnits(s.nairaAmountCents),
       date: (s.payment.confirmedAt ?? s.payment.createdAt).toISOString(),
       transactionId: s.payment.gatewayTxId,
       status: paymentStatusToApi[s.payment.status],

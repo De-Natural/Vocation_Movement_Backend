@@ -50,3 +50,36 @@ export const recurringSchema = z.object({
   method,
 });
 export type RecurringInputDto = z.infer<typeof recurringSchema>;
+
+// ── Guest checkout (no sponsor account) ──
+// A visitor can give a one-time gift with just a name + email; the receipt
+// goes to that email. Recurring gifts stay account-only.
+
+// POST /api/payments/guest/intent
+export const guestIntentSchema = z.object({
+  billId: z.string().min(1, 'A bill must be selected'),
+  amount: money,
+  anonymous: z.boolean().optional(),
+  method,
+  name: z
+    .string()
+    .trim()
+    .min(2, 'Please enter your name')
+    .max(120, 'Name is too long'),
+  email: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email('Please enter a valid email address')
+    .max(254),
+});
+export type GuestIntentInputDto = z.infer<typeof guestIntentSchema>;
+
+// POST /api/payments/guest/confirm — the clientSecret returned by the guest
+// intent proves the caller is the one who started this payment.
+export const guestConfirmSchema = z.object({
+  paymentId: z.string().min(1),
+  clientSecret: z.string().min(1),
+  simulate: z.enum(['success', 'decline']).default('success'),
+});
+export type GuestConfirmInputDto = z.infer<typeof guestConfirmSchema>;

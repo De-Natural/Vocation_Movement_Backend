@@ -56,8 +56,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
       message = exception.message;
     }
 
+    // A deliberate 503 (maintenance mode, SMS/bank service unavailable) carries
+    // a message written for the user: keep it.
+    const intentional503 =
+      exception instanceof AppException && statusCode === HttpStatus.SERVICE_UNAVAILABLE;
+
     // Log server errors with full detail; never expose them to the client.
-    if (statusCode >= 500) {
+    if (statusCode >= 500 && !intentional503) {
       this.logger.error(
         `${code}: ${(exception as Error)?.message ?? 'unknown'}`,
         (exception as Error)?.stack,

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Gateway, Prisma } from '@prisma/client';
-import { randomUUID } from 'crypto';
+import { Gateway, Payment, Prisma } from '@prisma/client';
+import { randomUUID, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.module';
 import { AggregationService } from '../aggregation/aggregation.service';
 import { NotificationsService } from '../notifications/notifications.module';
@@ -25,6 +25,8 @@ import {
   CreateIntentInputDto,
   ConfirmInputDto,
   RecurringInputDto,
+  GuestIntentInputDto,
+  GuestConfirmInputDto,
 } from './payments.dto';
 import { isStaff } from '../common/auth/staff';
 
@@ -33,6 +35,14 @@ const methodToGateway: Record<'card' | 'paystack', Gateway> = {
   card: 'STRIPE',
   paystack: 'PAYSTACK',
 };
+
+/** Constant-time compare of a stored client secret against a caller's. */
+function secretMatches(stored: string | null, given: string): boolean {
+  if (!stored) return false;
+  const a = Buffer.from(stored);
+  const b = Buffer.from(given);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 // Unique placeholder for gatewayTxId (has a @unique constraint) that lives
 // only between row creation and the gateway returning its real id.
@@ -130,20 +140,59 @@ export class PaymentsService {
    */
   async createIntent(userId: string, dto: CreateIntentInputDto) {
     const sponsor = await this.ownSponsor(userId);
-    const bill = await this.fundableBill(dto.billId);
+    return this.openOneTimeGift({
+      billId: dto.billId,
+      amount: dto.amount,
+      method: dto.method,
+      currency: sponsor.currency || this.config.defaults.currency,
+      isAnonymous: dto.anonymous ?? sponsor.anonymousByDefault,
+      payer: { sponsorId: sponsor.id },
+      email: sponsor.user.email,
+    });
+  }
 
-    const gateway = methodToGateway[dto.method];
-    const amountCents = unitsToCents(dto.amount);
+  /**
+   * POST /api/payments/guest/intent — the same one-time gift for a visitor
+   * without an account. No sponsor row: the payment carries the guest's
+   * name + email (receipt destination). Fee, minimum gift and aggregation
+   * are identical to a sponsor gift.
+   */
+  async createGuestIntent(dto: GuestIntentInputDto) {
+    const { defaultCurrency } = await this.settings.effective();
+    return this.openOneTimeGift({
+      billId: dto.billId,
+      amount: dto.amount,
+      method: dto.method,
+      currency: defaultCurrency || this.config.defaults.currency,
+      isAnonymous: dto.anonymous ?? false,
+      payer: { guestName: dto.name, guestEmail: dto.email },
+      email: dto.email,
+    });
+  }
+
+  /** Create a PENDING one-time payment + split and open the gateway intent. */
+  private async openOneTimeGift(input: {
+    billId: string;
+    amount: number;
+    method: 'card' | 'paystack';
+    currency: string;
+    isAnonymous: boolean;
+    payer: { sponsorId: string } | { guestName: string; guestEmail: string };
+    email: string;
+  }) {
+    const bill = await this.fundableBill(input.billId);
+
+    const gateway = methodToGateway[input.method];
+    const amountCents = unitsToCents(input.amount);
     await this.assertMinGift(amountCents);
-    const currency = sponsor.currency || this.config.defaults.currency;
-    const isAnonymous = dto.anonymous ?? sponsor.anonymousByDefault;
+    const { currency, isAnonymous } = input;
     const { feeCents, netAmountCents } = await this.feeFor(amountCents);
 
     // Create the PENDING payment + its single split first so we have an id
     // to correlate the webhook against.
     const payment = await this.prisma.payment.create({
       data: {
-        sponsorId: sponsor.id,
+        ...input.payer,
         religiousId: bill.religiousId,
         amountCents,
         feeCents,
@@ -162,7 +211,7 @@ export class PaymentsService {
       amountCents,
       currency,
       paymentId: payment.id,
-      sponsorEmail: sponsor.user.email,
+      sponsorEmail: input.email,
       metadata: { paymentId: payment.id, billId: bill.id },
     });
 
@@ -199,6 +248,35 @@ export class PaymentsService {
     if (!payment || payment.sponsorId !== sponsor.id) {
       throw AppException.notFound('Payment not found', 'PAYMENT_NOT_FOUND');
     }
+    return this.driveConfirm(payment, dto.simulate);
+  }
+
+  /**
+   * POST /api/payments/guest/confirm — a guest has no session, so the
+   * clientSecret handed back by the guest intent is the proof of ownership.
+   */
+  async confirmGuest(dto: GuestConfirmInputDto) {
+    const payment = await this.prisma.payment.findUnique({
+      where: { id: dto.paymentId },
+    });
+    if (!payment || payment.sponsorId !== null) {
+      throw AppException.notFound('Payment not found', 'PAYMENT_NOT_FOUND');
+    }
+    // The secret is cleared once confirmed; a repeat call just reports status.
+    if (
+      payment.status !== 'CONFIRMED' &&
+      !secretMatches(payment.gatewayRef, dto.clientSecret)
+    ) {
+      throw AppException.notFound('Payment not found', 'PAYMENT_NOT_FOUND');
+    }
+    return this.driveConfirm(payment, dto.simulate);
+  }
+
+  /** Shared confirm: stub mode self-drives the webhook; live just reports. */
+  private async driveConfirm(
+    payment: Payment,
+    simulate: 'success' | 'decline',
+  ) {
     if (payment.status === 'CONFIRMED') {
       return { paymentId: payment.id, status: paymentStatusToApi.CONFIRMED };
     }
@@ -206,7 +284,7 @@ export class PaymentsService {
     if (this.config.providerMode === 'stub') {
       const gw = this.gatewayFor(payment.gateway);
       if (gw instanceof StubGateway) {
-        const declined = dto.simulate === 'decline';
+        const declined = simulate === 'decline';
         const { body, signature } = gw.buildTestWebhook({
           type: declined ? 'payment.failed' : 'payment.succeeded',
           gatewayTxId: payment.gatewayTxId,
@@ -391,7 +469,9 @@ export class PaymentsService {
           gatewayRef: null, // clear the transient client secret
         },
       });
-      // Move every progress bar this payment feeds, then the student totals.
+      // Lock the gift's naira value at the current rate, then move every
+      // progress bar this payment feeds, then the student totals.
+      await this.aggregation.lockNaira(payment.id, tx);
       for (const billId of billIds) {
         await this.aggregation.recomputeBill(billId, tx);
       }
@@ -451,6 +531,7 @@ export class PaymentsService {
           },
         },
       });
+      await this.aggregation.lockNaira(pay.id, tx);
       await this.aggregation.recomputeBill(sponsorship.billId, tx);
       await this.aggregation.recomputeReligiousAggregates(
         sponsorship.religiousId,
@@ -483,7 +564,7 @@ export class PaymentsService {
     });
 
     // If this was a recurring charge, flag the sponsor.
-    if (payment.sponsorshipId) {
+    if (payment.sponsorshipId && payment.sponsorId) {
       const sponsor = await this.prisma.sponsorProfile.findUnique({
         where: { id: payment.sponsorId },
         include: { user: true },
@@ -542,7 +623,10 @@ export class PaymentsService {
     // Anonymity is enforced here too — the student never sees a hidden donor.
     const donorLabel = payment.isAnonymous
       ? 'An anonymous sponsor'
-      : payment.sponsor.fullName;
+      : (payment.sponsor?.fullName ?? payment.guestName ?? 'A sponsor');
+    // Receipt destination: the sponsor's account email, or the guest's email.
+    const receiptTo = payment.sponsor?.user.email ?? payment.guestEmail;
+    const receiptName = payment.sponsor?.fullName ?? payment.guestName;
 
     // 1) In-app notification + email to the student who received the gift.
     await this.notifications.notify({
@@ -568,13 +652,14 @@ export class PaymentsService {
     const settings = await this.prisma.platformSettings.findUnique({
       where: { id: 'singleton' },
     });
-    if (settings?.emailReceipts ?? true) {
+    if ((settings?.emailReceipts ?? true) && receiptTo) {
       await this.notifications.sendEmail({
-        to: payment.sponsor.user.email,
+        to: receiptTo,
         template: 'payment-receipt',
         subject: 'Your Vocation Movement gift receipt',
         data: {
-          name: payment.sponsor.fullName,
+          name: receiptName,
+          guest: !payment.sponsorId,
           amount: formatted,
           studentName: payment.religious.fullName,
           billName: billNames,
@@ -660,7 +745,7 @@ export class PaymentsService {
     }
 
     const isAdmin = isStaff(user.role);
-    const isOwner = payment.sponsor.userId === user.userId; // sponsor who paid
+    const isOwner = payment.sponsor?.userId === user.userId; // sponsor who paid
     if (!isAdmin && !isOwner) {
       throw AppException.forbidden(
         'You cannot view this receipt',
@@ -680,7 +765,7 @@ export class PaymentsService {
       // anonymity only hides the donor from the student/public.
       donorName: resolveDonorName(
         payment.isAnonymous,
-        payment.sponsor.fullName,
+        payment.sponsor?.fullName ?? payment.guestName,
         isAdmin || isOwner,
       ),
       anonymous: payment.isAnonymous,

@@ -5,7 +5,7 @@ import { APP_CONFIG, AppConfig } from '../../config/configuration';
 import { AppException } from '../http/app-exception';
 import { SettingsService } from '../../settings/settings.service';
 import { AuthUser, JwtPayload } from './jwt-payload';
-import { isStaff } from './staff';
+import { isSuperAdmin } from './staff';
 
 /**
  * Routes that stay open while the platform is in maintenance: signing in
@@ -25,7 +25,7 @@ export const MAINTENANCE_MESSAGE =
 
 /**
  * When the Super-Admin turns on maintenance mode, every request from anyone
- * other than staff (ADMIN / SUPERADMIN) is answered with 503
+ * other than the Super-Admin (admins included) is answered with 503
  * MAINTENANCE_MODE. Runs after JwtAuthGuard; on @Public routes (where
  * JwtAuthGuard doesn't decode the token) it reads the Bearer token itself so
  * signed-in staff can still preview public pages.
@@ -44,13 +44,16 @@ export class MaintenanceGuard implements CanActivate {
     const path = (req.originalUrl ?? req.url ?? '').split('?')[0];
     if (OPEN_DURING_MAINTENANCE.some((re) => re.test(path))) return true;
 
-    const { maintenanceMode } = await this.settings.effective();
+    const { maintenanceMode, maintenanceMessage } = await this.settings.effective();
     if (!maintenanceMode) return true;
 
     const role = req.user?.role ?? (await this.roleFromToken(req));
-    if (isStaff(role)) return true;
+    if (isSuperAdmin(role)) return true;
 
-    throw AppException.serviceUnavailable(MAINTENANCE_MESSAGE, 'MAINTENANCE_MODE');
+    throw AppException.serviceUnavailable(
+      maintenanceMessage || MAINTENANCE_MESSAGE,
+      'MAINTENANCE_MODE',
+    );
   }
 
   private async roleFromToken(req: Request): Promise<string | undefined> {

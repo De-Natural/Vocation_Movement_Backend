@@ -72,6 +72,25 @@ export class TokenService {
     return { userId, refreshToken };
   }
 
+  /**
+   * Revoke every stored refresh token except those belonging to `keepUserIds`
+   * (maintenance mode signs everyone but the Super-Admin out). Returns how many
+   * sessions were ended. Access tokens still live up to 15 min, but the
+   * maintenance guard refuses them meanwhile.
+   */
+  async revokeAllExcept(keepUserIds: Set<string>): Promise<number> {
+    let revoked = 0;
+    const stream = this.redis.client.scanStream({ match: 'refresh:*', count: 200 });
+    for await (const keys of stream as AsyncIterable<string[]>) {
+      const drop = keys.filter((k) => !keepUserIds.has(k.split(':')[1] ?? ''));
+      if (drop.length) {
+        await this.redis.client.del(...drop);
+        revoked += drop.length;
+      }
+    }
+    return revoked;
+  }
+
   /** Revoke a single refresh token (logout). */
   async revokeRefreshToken(raw: string): Promise<void> {
     const parts = raw.split('.');

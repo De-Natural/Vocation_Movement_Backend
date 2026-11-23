@@ -35,7 +35,16 @@ export interface AppConfig {
     region: string;
   };
   cloudinaryUrl: string;
-  email: { resendApiKey: string; from: string };
+  email: {
+    resendApiKey: string;
+    from: string;
+    /** SMTP server (Gmail, Zoho, Resend SMTP, …). Emails are only logged when host is empty. */
+    smtp: { host: string; port: number; secure: boolean; user: string; pass: string };
+  };
+  /** Termii SMS (phone OTP). Codes are only logged when apiKey is empty. */
+  sms: { termiiApiKey: string; termiiSenderId: string; termiiChannel: string };
+  /** Student withdrawals. Live Paystack transfers need PAYOUT_MODE=live + PAYSTACK_SECRET_KEY. */
+  payouts: { live: boolean; minCents: number; maxCents: number; dailyMaxCents: number };
 
   defaults: {
     currency: string;
@@ -148,6 +157,26 @@ export function loadConfig(): AppConfig {
       from:
         process.env.EMAIL_FROM ??
         'Vocation Movement <no-reply@vocationmovement.org>',
+      smtp: {
+        host: process.env.SMTP_HOST ?? '',
+        port: parseInt(process.env.SMTP_PORT ?? '465', 10),
+        secure: (process.env.SMTP_SECURE ?? 'true') !== 'false',
+        user: process.env.SMTP_USER ?? '',
+        pass: process.env.SMTP_PASS ?? '',
+      },
+    },
+    sms: {
+      termiiApiKey: process.env.TERMII_API_KEY ?? '',
+      termiiSenderId: process.env.TERMII_SENDER_ID ?? 'N-Alert',
+      // "dnd" reaches numbers on Do-Not-Disturb (needed for OTPs in Nigeria).
+      termiiChannel: process.env.TERMII_CHANNEL ?? 'dnd',
+    },
+    payouts: {
+      live: process.env.PAYOUT_MODE === 'live',
+      // Amounts in kobo (NGN cents).
+      minCents: parseInt(process.env.PAYOUT_MIN_CENTS ?? '100000', 10), // ₦1,000
+      maxCents: parseInt(process.env.PAYOUT_MAX_CENTS ?? '50000000', 10), // ₦500,000 per withdrawal
+      dailyMaxCents: parseInt(process.env.PAYOUT_DAILY_MAX_CENTS ?? '100000000', 10), // ₦1,000,000 per day
     },
 
     defaults: {

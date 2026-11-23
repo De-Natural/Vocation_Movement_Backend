@@ -7,7 +7,9 @@ import { parsePagination, paginationMeta } from '../common/utils/pagination';
 import { centsToUnits, verificationToApi } from '../common/serializers/enum-maps';
 import { ActivityQuery, CreateAdminInput, UsersQuery } from './superadmin.dto';
 
-const BCRYPT_COST = 12; // same as auth.service (PRD §5.2)
+const BCRYPT_COST = 10; // same as auth.service
+/** The Super-Admin can create at most this many admin accounts. */
+export const MAX_ADMINS = 3;
 
 /** A staff account as shown on the Manage Admins page. */
 export interface StaffRow {
@@ -83,7 +85,17 @@ export class SuperAdminService {
   }
 
   async createAdmin(actorId: string, dto: CreateAdminInput): Promise<StaffRow> {
-    const exists = await this.prisma.user.findUnique({ where: { email: dto.email } });
+    const [exists, adminCount] = await Promise.all([
+      this.prisma.user.findUnique({ where: { email: dto.email } }),
+      // Suspended admins still count: delete one to free a place.
+      this.prisma.user.count({ where: { role: 'ADMIN' } }),
+    ]);
+    if (adminCount >= MAX_ADMINS) {
+      throw AppException.conflict(
+        `You can have at most ${MAX_ADMINS} admins. Delete an existing admin to add a new one.`,
+        'ADMIN_LIMIT',
+      );
+    }
     if (exists) {
       throw AppException.conflict('An account with this email already exists', 'EMAIL_TAKEN');
     }
@@ -210,10 +222,10 @@ export class SuperAdminService {
       ? await this.prisma.payment.groupBy({
           by: ['sponsorId'],
           where: { sponsorId: { in: sponsorIds }, status: 'CONFIRMED' },
-          _sum: { amountCents: true },
+          _sum: { nairaAmountCents: true },
         })
       : [];
-    const givenBy = new Map(given.map((g) => [g.sponsorId, g._sum.amountCents ?? 0]));
+    const givenBy = new Map(given.map((g) => [g.sponsorId, g._sum.nairaAmountCents ?? 0]));
 
     const rows: UserRow[] = users.map((u) => {
       const student = u.religiousProfile;
@@ -320,7 +332,7 @@ export class SuperAdminService {
         _count: { _all: true },
       }),
       this.prisma.payment.aggregate({
-        _sum: { amountCents: true },
+        _sum: { nairaAmountCents: true },
         where: { status: 'CONFIRMED' },
       }),
       this.activity({ perPage: 8 }),
@@ -343,7 +355,7 @@ export class SuperAdminService {
         suspendedSponsors: count(suspended, 'SPONSOR'),
       },
       verification,
-      fundsRaised: centsToUnits(funds._sum.amountCents ?? 0),
+      fundsRaised: centsToUnits(funds._sum.nairaAmountCents ?? 0),
       staffActionsLast30Days: actions30d,
       recentActivity: recent.rows,
     };

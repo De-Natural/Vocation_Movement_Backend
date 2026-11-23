@@ -67,6 +67,12 @@ export const updateSettingsSchema = z.object({
   maintenanceMode: z.boolean().optional(),
   anonymousDefault: z.boolean().optional(),
   emailReceipts: z.boolean().optional(),
+  // Shown on the maintenance page and emailed to every user when maintenance is switched on.
+  maintenanceMessage: z.string().trim().max(2000).nullable().optional(),
+  // Naira per 1 unit of a foreign currency, used to convert gifts for withdrawal.
+  payoutFxRates: z
+    .record(z.string().regex(/^[A-Z]{3}$/), z.number().positive().max(1_000_000))
+    .optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 

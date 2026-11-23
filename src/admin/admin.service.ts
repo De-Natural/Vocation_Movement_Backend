@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma, Role, VerificationState } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.module';
 import { NotificationsService } from '../notifications/notifications.module';
@@ -18,7 +18,11 @@ import {
   UpdateSettingsInput,
 } from './admin.dto';
 import { isStaff, isSuperAdmin } from '../common/auth/staff';
-import { SettingsService } from '../settings/settings.service';
+import { SettingsService, cleanFxRates } from '../settings/settings.service';
+import { TokenService } from '../auth/token.service';
+import { AggregationService } from '../aggregation/aggregation.service';
+import { renderReportPdf, ReportParams } from './report-pdf';
+import { MAINTENANCE_MESSAGE } from '../common/auth/maintenance.guard';
 
 /**
  * Settings only a SUPERADMIN may change (PATCH /admin/settings). Auto-approve
@@ -30,6 +34,8 @@ export const SUPERADMIN_ONLY_SETTINGS = [
   'maintenanceMode',
   'minGift',
   'platformFeePercent',
+  'maintenanceMessage',
+  'payoutFxRates',
 ] as const;
 
 const SETTINGS_ID = 'singleton';
@@ -53,7 +59,11 @@ export class AdminService {
     private readonly notifications: NotificationsService,
     private readonly uploads: UploadsService,
     private readonly settingsReader: SettingsService,
+    private readonly tokens: TokenService,
+    private readonly aggregation: AggregationService,
   ) {}
+
+  private readonly logger = new Logger(AdminService.name);
 
   // ═══════════════════ Verification workflow (§7.5) ═══════════════════
 
@@ -382,19 +392,20 @@ export class AdminService {
         ...(isCsv ? { take: 5000, skip: 0 } : { skip, take }),
       }),
       this.prisma.payment.count({ where }),
-      this.prisma.payment.aggregate({ _sum: { amountCents: true }, where }),
+      this.prisma.payment.aggregate({ _sum: { nairaAmountCents: true }, where }),
     ]);
 
     const rows: TransactionRow[] = payments.map((p) => ({
       id: p.id,
       date: (p.confirmedAt ?? p.createdAt).toISOString(),
       // Admin sees the real donor name even when anonymous (audit view).
-      donorName: p.sponsor.fullName,
+      donorName: p.sponsor?.fullName ?? `${p.guestName ?? 'Guest'} (guest)`,
       anonymous: p.isAnonymous,
       studentName: p.religious.fullName,
       congregation: p.religious.congregationName,
       billName: p.splits.map((s) => s.bill.name).join(', ') || '—',
       amount: centsToUnits(p.amountCents),
+      nairaAmount: p.nairaAmountCents === null ? null : centsToUnits(p.nairaAmountCents),
       currency: p.currency,
       transactionId: p.gatewayTxId,
       status:
@@ -408,7 +419,8 @@ export class AdminService {
 
     return {
       rows,
-      totalAmount: centsToUnits(sumAgg._sum.amountCents ?? 0),
+      // In naira (gifts with no exchange rate yet are not included).
+      totalAmount: centsToUnits(sumAgg._sum.nairaAmountCents ?? 0),
       meta: paginationMeta(page, perPage, total),
       csv: transactionsToCsv(rows),
     };
@@ -425,44 +437,45 @@ export class AdminService {
       unreadInquiries,
       sponsorCount,
       activeRecurring,
+      overdue,
+      pendingQueue,
+      recentInquiries,
     ] = await Promise.all([
       this.prisma.religiousProfile.count(),
       this.prisma.religiousProfile.count({
         where: { verificationState: 'PENDING' },
       }),
       this.prisma.payment.aggregate({
-        _sum: { amountCents: true },
+        _sum: { nairaAmountCents: true },
         where: { status: 'CONFIRMED' },
       }),
       this.prisma.contactInquiry.count({ where: { status: 'UNREAD' } }),
       this.prisma.sponsorProfile.count(),
       this.prisma.sponsorship.count({ where: { status: 'ACTIVE' } }),
+      // Overdue bills, joined with student for the "needs attention" list.
+      // (Run in parallel with the counts: one round trip instead of four.)
+      this.prisma.bill.findMany({
+        where: { status: 'OVERDUE' },
+        include: { religious: true },
+        orderBy: { dueDate: 'asc' },
+        take: 10,
+      }),
+      this.prisma.religiousProfile.findMany({
+        where: { verificationState: 'PENDING' },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+      this.prisma.contactInquiry.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
     ]);
-
-    // Overdue bills, joined with student for the "needs attention" list.
-    const overdue = await this.prisma.bill.findMany({
-      where: { status: 'OVERDUE' },
-      include: { religious: true },
-      orderBy: { dueDate: 'asc' },
-      take: 10,
-    });
-
-    const pendingQueue = await this.prisma.religiousProfile.findMany({
-      where: { verificationState: 'PENDING' },
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
-
-    const recentInquiries = await this.prisma.contactInquiry.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
 
     return {
       kpis: {
         studentsSupported: totalStudents,
         pendingVerification: pendingCount,
-        fundsRaised: centsToUnits(fundsAgg._sum.amountCents ?? 0),
+        fundsRaised: centsToUnits(fundsAgg._sum.nairaAmountCents ?? 0),
         unreadInquiries,
         sponsors: sponsorCount,
         activeSponsorships: activeRecurring,
@@ -500,7 +513,12 @@ export class AdminService {
       create: { id: SETTINGS_ID },
       update: {},
     });
-    return this.serializeSettings(settings);
+    return { ...this.serializeSettings(settings), liveFx: await this.liveFx() };
+  }
+
+  /** Today's live exchange rates (read-only, shown next to the overrides). */
+  private async liveFx() {
+    return (await this.settingsReader.effective()).liveFx;
   }
 
   async updateSettings(
@@ -513,8 +531,11 @@ export class AdminService {
     // field) but not change them.
     if (!isSuperAdmin(actorRole)) {
       const current = await this.getSettings();
+      // JSON compare: payoutFxRates is an object, resent unchanged by the form.
       const changed = SUPERADMIN_ONLY_SETTINGS.filter(
-        (k) => dto[k] !== undefined && dto[k] !== current[k],
+        (k) =>
+          dto[k] !== undefined &&
+          JSON.stringify(dto[k] ?? null) !== JSON.stringify(current[k] ?? null),
       );
       if (changed.length) {
         throw AppException.forbidden(
@@ -534,7 +555,12 @@ export class AdminService {
     if (dto.maintenanceMode !== undefined) data.maintenanceMode = dto.maintenanceMode;
     if (dto.anonymousDefault !== undefined) data.anonymousDefault = dto.anonymousDefault;
     if (dto.emailReceipts !== undefined) data.emailReceipts = dto.emailReceipts;
+    if (dto.maintenanceMessage !== undefined)
+      data.maintenanceMessage = dto.maintenanceMessage?.trim() || null;
+    if (dto.payoutFxRates !== undefined)
+      data.payoutFxRates = cleanFxRates(dto.payoutFxRates) as Prisma.InputJsonValue;
 
+    const wasInMaintenance = (await this.settingsReader.effective()).maintenanceMode;
     const settings = await this.prisma.platformSettings.upsert({
       where: { id: SETTINGS_ID },
       create: { id: SETTINGS_ID, ...(data as Prisma.PlatformSettingsCreateInput) },
@@ -550,7 +576,66 @@ export class AdminService {
       },
     });
 
-    return this.serializeSettings(settings);
+    // New exchange rates: give a naira value to gifts that had none yet.
+    if (dto.payoutFxRates !== undefined) {
+      const converted = await this.aggregation.backfillNaira();
+      if (converted) this.logger.log(`Converted ${converted} gift(s) to naira at the new rates`);
+    }
+
+    // Switching maintenance ON: sign everyone but the Super-Admin out and
+    // email every user the Super-Admin's notice.
+    let maintenance: { sessionsEnded: number; emailsQueued: number } | undefined;
+    if (!wasInMaintenance && settings.maintenanceMode) {
+      maintenance = await this.startMaintenance(settings.maintenanceMessage);
+    }
+
+    return {
+      ...this.serializeSettings(settings),
+      liveFx: await this.liveFx(),
+      ...(maintenance ? { maintenance } : {}),
+    };
+  }
+
+  /** Sign out everyone except Super-Admins, then email all other users. */
+  private async startMaintenance(message: string | null) {
+    const users = await this.prisma.user.findMany({
+      where: { isSuspended: false },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        name: true,
+        religiousProfile: { select: { fullName: true } },
+        sponsorProfile: { select: { fullName: true } },
+      },
+    });
+    const superAdmins = new Set(users.filter((u) => isSuperAdmin(u.role)).map((u) => u.id));
+    const sessionsEnded = await this.tokens.revokeAllExcept(superAdmins);
+
+    const recipients = users.filter((u) => !superAdmins.has(u.id));
+    const notice = message?.trim() || MAINTENANCE_MESSAGE;
+    // Sent one after another in the background so a large list doesn't
+    // flood the mail server or hold up the Super-Admin's request.
+    void (async () => {
+      for (const u of recipients) {
+        await this.notifications.sendEmail({
+          to: u.email,
+          template: 'maintenance-notice',
+          subject: 'Vocation Movement is undergoing maintenance',
+          data: {
+            name: u.religiousProfile?.fullName ?? u.sponsorProfile?.fullName ?? u.name ?? undefined,
+            message: notice,
+          },
+        });
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    })().catch((err: unknown) =>
+      this.logger.error(`Maintenance emails stopped: ${(err as Error)?.message ?? err}`),
+    );
+    this.logger.log(
+      `Maintenance on: ${sessionsEnded} session(s) ended, ${recipients.length} email(s) queued`,
+    );
+    return { sessionsEnded, emailsQueued: recipients.length };
   }
 
   private serializeSettings(s: {
@@ -563,6 +648,8 @@ export class AdminService {
     maintenanceMode: boolean;
     anonymousDefault: boolean;
     emailReceipts: boolean;
+    maintenanceMessage: string | null;
+    payoutFxRates: Prisma.JsonValue;
   }) {
     return {
       organizationName: s.organizationName,
@@ -574,6 +661,9 @@ export class AdminService {
       maintenanceMode: s.maintenanceMode,
       anonymousDefault: s.anonymousDefault,
       emailReceipts: s.emailReceipts,
+      maintenanceMessage: s.maintenanceMessage ?? '',
+      // The Super-Admin's overrides (empty = use the live rate).
+      payoutFxRates: cleanFxRates(s.payoutFxRates),
     };
   }
 
@@ -606,8 +696,8 @@ export class AdminService {
           kind: r.kind,
           title: r.title,
           fileUrl: r.fileUrl,
-          // Signed so the admin UI can download it (private bucket).
-          url: await this.uploads.signedUrl(r.fileUrl),
+          // Rendered fresh on download (GET /api/admin/reports/:id/pdf, staff only).
+          url: `/api/admin/reports/${r.id}/pdf`,
           createdAt: r.createdAt.toISOString(),
         })),
       ),
@@ -615,9 +705,9 @@ export class AdminService {
   }
 
   /**
-   * Record a report generation request. Actual PDF rendering is handed to
-   * the storage/report provider; here we persist the metadata row so the
-   * admin UI can list & download it. The stub writes a placeholder file.
+   * Record a report request. The PDF itself is rendered from live data each
+   * time it is downloaded (reportPdf), so nothing depends on files kept on
+   * the server's disk.
    */
   async generateReport(adminUserId: string, dto: GenerateReportInput) {
     const title =
@@ -627,19 +717,11 @@ export class AdminService {
           ? `Monthly report — ${dto.month}`
           : 'Platform report';
 
-    // Placeholder document (a real generator would produce a PDF buffer).
-    const stored = await this.uploads.store('reports', {
-      originalname: `${dto.kind}-report.pdf`,
-      mimetype: 'application/pdf',
-      size: 20,
-      buffer: Buffer.from('%PDF-1.4\n% Vocation Movement report\n'),
-    });
-
     const report = await this.prisma.report.create({
       data: {
         kind: dto.kind,
         title,
-        fileUrl: stored.key,
+        fileUrl: '', // rendered on demand: see reportPdf()
         params: dto as Prisma.InputJsonValue,
         generatedBy: adminUserId,
       },
@@ -648,9 +730,27 @@ export class AdminService {
     return {
       id: report.id,
       title: report.title,
-      url: await this.uploads.signedUrl(stored.key),
+      url: `/api/admin/reports/${report.id}/pdf`,
       createdAt: report.createdAt.toISOString(),
     };
+  }
+
+  /** GET /api/admin/reports/:id/pdf — render a saved report as a PDF. */
+  async reportPdf(id: string): Promise<{ filename: string; pdf: Buffer }> {
+    const report = await this.prisma.report.findUnique({ where: { id } });
+    if (!report) throw AppException.notFound('Report not found', 'REPORT_NOT_FOUND');
+    const p = (report.params ?? {}) as Partial<ReportParams>;
+    const kinds: ReportParams['kind'][] = ['congregation', 'platform', 'monthly'];
+    const kind = kinds.find((k) => k === report.kind) ?? 'platform';
+    const { organizationName } = await this.settingsReader.effective();
+    const pdf = await renderReportPdf(
+      this.prisma,
+      { kind, congregation: p.congregation, month: p.month },
+      { title: report.title, organizationName, generatedAt: new Date() },
+    );
+    const slug =
+      report.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'report';
+    return { filename: `${slug}.pdf`, pdf };
   }
 }
 
@@ -665,6 +765,8 @@ export interface TransactionRow {
   billName: string;
   amount: number;
   currency: string;
+  /** The gift in naira at its locked rate (null: no rate for its currency yet). */
+  nairaAmount: number | null;
   transactionId: string;
   status: 'Confirmed' | 'Pending' | 'Failed';
   recurring: boolean;

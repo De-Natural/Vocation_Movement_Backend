@@ -94,6 +94,8 @@ enum NotificationType {
   RECURRING_FAILED
   SPONSORSHIP_CANCELLED
   BILL_OVERDUE
+  WITHDRAWAL_PAID
+  WITHDRAWAL_FAILED
   SYSTEM
 }
 
@@ -139,6 +141,7 @@ model User {
 
   notifications      Notification[]
   emailTokens        EmailToken[]
+  otpCodes           OtpCode[]
   adminActionsActor  AdminAction[]  @relation("AdminActor")
   adminActionsTarget AdminAction[]  @relation("AdminTarget")
 
@@ -163,6 +166,8 @@ model ReligiousProfile {
   country          String
   location         String   @default("")
   phoneNumber      String   @default("")
+  /// Set when the student confirms an SMS code sent to phoneNumber.
+  phoneVerifiedAt  DateTime?
   dateOfBirth      DateTime?
   gender           String?
   yearOfFormation  Int?
@@ -186,6 +191,8 @@ model ReligiousProfile {
   verificationDocs VerificationDoc[]
   sentMessages     Message[]         @relation("StudentMessages")
   sponsorships     Sponsorship[]
+  payoutAccount    PayoutAccount?
+  withdrawals      Withdrawal[]
 
   @@index([verificationState])
   @@index([congregationName])
@@ -199,6 +206,7 @@ model SponsorProfile {
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   fullName           String
+  photoUrl           String?
   country            String  @default("")
   currency           String  @default("USD")
   anonymousByDefault Boolean @default(false)
@@ -240,11 +248,16 @@ model Bill {
 
 /// Every transaction made on the platform. Source of truth for financials.
 model Payment {
-  id          String @id @default(cuid())
-  sponsorId   String
+  id          String  @id @default(cuid())
+  /// Null for a guest gift (no sponsor account) — see guestName/guestEmail.
+  sponsorId   String?
   religiousId String
 
-  sponsor   SponsorProfile   @relation(fields: [sponsorId], references: [id])
+  sponsor   SponsorProfile?  @relation(fields: [sponsorId], references: [id], onDelete: Restrict)
+
+  /// Guest checkout: who gave when there is no sponsor account (receipt goes to guestEmail).
+  guestName  String?
+  guestEmail String?
   religious ReligiousProfile @relation(fields: [religiousId], references: [id])
 
   amountCents   Int // gross gift total across splits, smallest currency unit (what the sponsor is charged)
@@ -261,6 +274,12 @@ model Payment {
   sponsorship   Sponsorship?  @relation(fields: [sponsorshipId], references: [id])
   failureReason String?
 
+  /// Naira value locked when the gift is confirmed (or when the Super-Admin first sets a
+  /// rate for its currency). Null = no rate yet, so it isn't counted in naira totals.
+  fxRate           Float? // naira per 1 unit of `currency` used for the lock (1 for NGN)
+  nairaAmountCents Int? // amountCents in naira (gross)
+  nairaNetCents    Int? // netAmountCents in naira (what the student receives)
+
   createdAt   DateTime  @default(now())
   confirmedAt DateTime?
 
@@ -270,6 +289,7 @@ model Payment {
   @@index([religiousId])
   @@index([status])
   @@index([createdAt])
+  @@index([guestEmail])
   @@map("payments")
 }
 
@@ -284,6 +304,8 @@ model PaymentSplit {
 
   amountCents    Int // gross portion of this payment allocated to this bill (drives Contribution.amount)
   netAmountCents Int @default(0) // portion net of platform fee (drives Bill.raised / the progress bar)
+  nairaAmountCents Int? // amountCents in naira, locked with the payment's fxRate
+  nairaNetCents    Int? // netAmountCents in naira: what Bill.raised sums
 
   @@index([paymentId])
   @@index([billId])
@@ -478,8 +500,93 @@ model PlatformSettings {
   maintenanceMode   Boolean @default(false)
   anonymousDefault  Boolean @default(false) // new sponsors give anonymously unless they opt out
   emailReceipts     Boolean @default(true)  // send an emailed receipt after every confirmed gift
+  /// Message the Super-Admin writes when switching maintenance on (shown on the site + emailed).
+  maintenanceMessage String?
+  /// Payout exchange rates into naira, e.g. {"USD": 1550, "GHS": 105}: gifts in these
+  /// currencies become withdrawable naira at this rate. Set by the Super-Admin.
+  payoutFxRates     Json    @default("{}")
 
   updatedAt DateTime @updatedAt
 
   @@map("platform_settings")
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  One-time codes (email + phone OTP) and student withdrawals
+// ══════════════════════════════════════════════════════════════════
+
+/// A short numeric code sent by email or SMS. Only a hash is stored.
+model OtpCode {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  purpose  String // "email-verify" | "phone-verify" | "withdrawal"
+  target   String // the email address or phone number the code was sent to
+  codeHash String
+  attempts Int       @default(0)
+  expires  DateTime
+  usedAt   DateTime?
+  /// Extra context, e.g. the withdrawal id the code confirms.
+  ref      String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, purpose])
+  @@map("otp_codes")
+}
+
+/// The bank account a student withdraws to, verified with the bank.
+model PayoutAccount {
+  id          String           @id @default(cuid())
+  religiousId String           @unique
+  religious   ReligiousProfile @relation(fields: [religiousId], references: [id], onDelete: Cascade)
+
+  bankCode      String
+  bankName      String
+  accountNumber String
+  accountName   String // as returned by the bank, not typed by the student
+  /// Paystack transfer recipient code, created on first payout.
+  recipientCode String?
+  verifiedAt    DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("payout_accounts")
+}
+
+enum WithdrawalStatus {
+  AWAITING_OTP // created; waiting for the SMS code
+  PROCESSING // code confirmed; transfer sent to the bank
+  PAID
+  FAILED
+  CANCELLED // code never confirmed
+}
+
+model Withdrawal {
+  id          String           @id @default(cuid())
+  religiousId String
+  religious   ReligiousProfile @relation(fields: [religiousId], references: [id])
+
+  amountCents Int
+  currency    String           @default("NGN")
+  status      WithdrawalStatus @default(AWAITING_OTP)
+
+  // Snapshot of where the money went, so later account changes don't rewrite history.
+  bankName      String
+  accountNumber String
+  accountName   String
+
+  reference     String  @unique // our idempotency key sent to the gateway
+  transferCode  String? // gateway transfer id
+  failureReason String?
+
+  createdAt   DateTime  @default(now())
+  confirmedAt DateTime?
+  completedAt DateTime?
+
+  @@index([religiousId])
+  @@index([status])
+  @@map("withdrawals")
 }

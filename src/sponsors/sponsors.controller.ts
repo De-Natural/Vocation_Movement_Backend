@@ -7,7 +7,13 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { IncomingFile } from '../uploads/uploads.service';
+import { AppException } from '../common/http/app-exception';
+import { RateLimit } from '../common';
 import { SponsorsService } from './sponsors.service';
 import { ok } from '../common/http/response';
 import { Roles, CurrentUser } from '../common';
@@ -30,6 +36,15 @@ export class SponsorsController {
   @Get('me')
   async me(@CurrentUser() user: AuthUser) {
     return ok(await this.sponsors.getOwnProfile(user.userId));
+  }
+
+  // POST /api/sponsors/photo — profile picture (shown in the navbar)
+  @RateLimit({ limit: 20, windowSeconds: 3600, name: 'sponsor-photo' })
+  @Post('photo')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadPhoto(@CurrentUser() user: AuthUser, @UploadedFile() file: IncomingFile) {
+    if (!file) throw AppException.badRequest('No file provided', 'NO_FILE');
+    return ok(await this.sponsors.uploadPhoto(user.userId, file), 'Photo updated');
   }
 
   // GET /api/sponsors/me/dashboard — giving KPIs, my students, recent gifts

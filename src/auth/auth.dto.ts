@@ -58,6 +58,12 @@ export const resendVerificationSchema = z.object({
 });
 export type ResendVerificationInput = z.infer<typeof resendVerificationSchema>;
 
+export const verifyEmailOtpSchema = z.object({
+  email: z.string().email(),
+  code: z.string().trim().regex(/^\d{6}$/, 'Enter the 6-digit code from the email'),
+});
+export type VerifyEmailOtpInput = z.infer<typeof verifyEmailOtpSchema>;
+
 export const resetPasswordSchema = z.object({
   token: z.string().min(10),
   password: z.string().min(8).max(128),

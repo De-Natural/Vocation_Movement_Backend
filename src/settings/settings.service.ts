@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.module';
 import { APP_CONFIG, AppConfig } from '../config/configuration';
+import { FxRatesService, LiveFxRates } from './fx-rates.service';
 
 /**
  * The fully-resolved platform settings that actually govern runtime
@@ -19,6 +20,29 @@ export interface EffectiveSettings {
   maintenanceMode: boolean;
   anonymousDefault: boolean;
   emailReceipts: boolean;
+  /** Super-Admin's maintenance notice (null = the default wording). */
+  maintenanceMessage: string | null;
+  /**
+   * The rates in force: naira per 1 unit of each foreign currency, e.g.
+   * { USD: 1367.64 }. The live rate, unless the Super-Admin set an override.
+   */
+  payoutFxRates: Record<string, number>;
+  /** The Super-Admin's overrides only (stored in PlatformSettings). */
+  fxOverrides: Record<string, number>;
+  /** Today's live rates (refreshed daily), or null before the first fetch. */
+  liveFx: LiveFxRates | null;
+}
+
+/** Keep only well-formed { "USD": 1550 } entries from the stored JSON. */
+export function cleanFxRates(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      const n = Number(v);
+      if (/^[A-Z]{3}$/.test(k) && k !== 'NGN' && Number.isFinite(n) && n > 0) out[k] = n;
+    }
+  }
+  return out;
 }
 
 /** Result of applying the platform fee to a gift under Fee Model A. */
@@ -57,6 +81,7 @@ export class SettingsService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly fx: FxRatesService,
   ) {}
 
   /**
@@ -74,9 +99,11 @@ export class SettingsService {
   }
 
   private async read(): Promise<EffectiveSettings> {
-    const row = await this.prisma.platformSettings.findUnique({
-      where: { id: 'singleton' },
-    });
+    const [row, liveFx] = await Promise.all([
+      this.prisma.platformSettings.findUnique({ where: { id: 'singleton' } }),
+      this.fx.current(),
+    ]);
+    const fxOverrides = cleanFxRates(row?.payoutFxRates);
     const d = this.config.defaults;
     return {
       organizationName: row?.organizationName ?? 'Vocation Movement',
@@ -88,6 +115,11 @@ export class SettingsService {
       maintenanceMode: row?.maintenanceMode ?? false,
       anonymousDefault: row?.anonymousDefault ?? false,
       emailReceipts: row?.emailReceipts ?? true,
+      maintenanceMessage: row?.maintenanceMessage?.trim() || null,
+      // Live rate per currency, replaced by the Super-Admin's override where set.
+      payoutFxRates: { ...cleanFxRates(liveFx?.rates), ...fxOverrides },
+      fxOverrides,
+      liveFx,
     };
   }
 

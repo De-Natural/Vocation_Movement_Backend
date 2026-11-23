@@ -16,7 +16,7 @@ import { JobsService } from './jobs/jobs.service';
  *   npm run worker overdue    # overdue-bill sweep only
  *   npm run worker cleanup    # expired-token cleanup only
  */
-type JobName = 'recurring' | 'overdue' | 'cleanup' | 'all';
+type JobName = 'recurring' | 'overdue' | 'rates' | 'cleanup' | 'all';
 
 async function run(): Promise<void> {
   const logger = new Logger('Worker');
@@ -38,6 +38,10 @@ async function run(): Promise<void> {
     if (which === 'overdue' || which === 'all') {
       const r = await jobs.checkOverdueBills();
       logger.log(`Overdue sweep — scanned:${r.scanned} flagged:${r.flagged}`);
+    }
+    if (which === 'rates' || which === 'all') {
+      const r = await jobs.refreshExchangeRates(true);
+      logger.log(`Exchange rates — waiting gifts converted:${r.converted}`);
     }
     if (which === 'cleanup' || which === 'all') {
       const r = await jobs.cleanupExpiredTokens();
