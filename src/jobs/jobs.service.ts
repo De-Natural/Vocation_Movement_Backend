@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.module';
 import { AggregationService } from '../aggregation/aggregation.service';
@@ -7,6 +7,8 @@ import { PaymentsService } from '../payments/payments.service';
 import { APP_CONFIG, AppConfig } from '../config/configuration';
 import { centsToUnits } from '../common/serializers';
 import { PlatformStats } from '../common/serializers/api-types';
+import { FxRatesService } from '../settings/fx-rates.service';
+import { SettingsService } from '../settings/settings.service';
 
 /**
  * Background jobs (PRD §8). Three scheduled sweeps plus the public platform
@@ -17,7 +19,7 @@ import { PlatformStats } from '../common/serializers/api-types';
  * which honours the frozen demo date so results match the seed + frontend.
  */
 @Injectable()
-export class JobsService {
+export class JobsService implements OnApplicationBootstrap {
   private readonly logger = new Logger(JobsService.name);
 
   constructor(
@@ -26,7 +28,35 @@ export class JobsService {
     private readonly notifications: NotificationsService,
     private readonly payments: PaymentsService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly fx: FxRatesService,
+    private readonly settings: SettingsService,
   ) {}
+
+  // ─────────────────── Live exchange rates (daily) ───────────────────
+
+  /** On start-up, make sure live rates exist (in the background: never delays boot). */
+  onApplicationBootstrap(): void {
+    void this.refreshExchangeRates(false).catch((err: unknown) =>
+      this.logger.error(`Start-up rate refresh failed: ${(err as Error)?.message ?? err}`),
+    );
+  }
+
+  /**
+   * Fetch today's live rates, then give a naira value to any gift still
+   * waiting for one and refresh every total. Daily at 06:00; `force=false`
+   * (start-up) only fetches when the stored rates are over 12 hours old.
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_6AM, { name: 'exchange-rates' })
+  async refreshExchangeRates(force = true): Promise<{ converted: number }> {
+    const live = force ? await this.fx.refresh() : await this.fx.refreshIfStale();
+    if (!live) return { converted: 0 };
+    this.settings.invalidate(); // use the new rates straight away
+    const pending = await this.prisma.payment.count({ where: { status: 'CONFIRMED', nairaNetCents: null } });
+    if (!pending) return { converted: 0 };
+    const converted = await this.aggregation.backfillNaira();
+    this.logger.log(`Exchange rates: ${converted} waiting gift(s) converted to naira`);
+    return { converted };
+  }
 
   // ─────────────────── Overdue bills (daily) ───────────────────
 
@@ -125,7 +155,7 @@ export class JobsService {
           })
           .then((rows) => rows.length),
         this.prisma.payment.aggregate({
-          _sum: { amountCents: true },
+          _sum: { nairaAmountCents: true },
           where: { status: 'CONFIRMED' },
         }),
         this.prisma.sponsorProfile.count(),
@@ -134,7 +164,8 @@ export class JobsService {
 
     return {
       studentsSupported,
-      fundsRaised: centsToUnits(fundsAgg._sum.amountCents ?? 0),
+      // Naira (each gift at its locked exchange rate).
+      fundsRaised: centsToUnits(fundsAgg._sum.nairaAmountCents ?? 0),
       sponsors,
       activeSponsorships,
     };

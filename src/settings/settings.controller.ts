@@ -21,6 +21,7 @@ export class SettingsController {
       supportEmail: s.supportEmail,
       currency: s.defaultCurrency,
       maintenanceMode: s.maintenanceMode,
+      maintenanceMessage: s.maintenanceMessage,
       minGift: centsToUnits(s.minGiftCents),
       anonymousDefault: s.anonymousDefault,
       platformFeePercent: s.platformFeePercent,

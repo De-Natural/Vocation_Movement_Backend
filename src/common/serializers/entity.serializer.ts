@@ -56,7 +56,7 @@ export function serializeContribution(
   const p = split.payment;
   const donorName = resolveDonorName(
     p.isAnonymous,
-    p.sponsor?.fullName,
+    p.sponsor?.fullName ?? p.guestName,
     opts.viewerIsAdmin,
   );
   return {
@@ -67,6 +67,8 @@ export function serializeContribution(
     donorName,
     anonymous: p.isAnonymous,
     amount: centsToUnits(split.amountCents),
+    currency: p.currency,
+    nairaAmount: split.nairaAmountCents === null ? null : centsToUnits(split.nairaAmountCents),
     date: iso(p.confirmedAt ?? p.createdAt),
     transactionId: p.gatewayTxId,
     status: paymentStatusToApi[p.status],
@@ -162,6 +164,7 @@ export function serializeSponsor(sponsor: SponsorWithAggregates): Sponsor {
   return {
     id: sponsor.id,
     name: sponsor.fullName,
+    photo: sponsor.photoUrl ?? undefined,
     email: sponsor.user?.email ?? '',
     country: sponsor.country,
     currency: sponsor.currency,
@@ -188,6 +191,7 @@ export function serializeRecurring(
     studentName: s.religious?.fullName ?? '',
     studentPhoto: s.religious?.photoUrl ?? '',
     amount: centsToUnits(s.amountCents),
+    currency: s.currency,
     billName: s.bill?.name ?? '',
     active: s.status === 'ACTIVE',
     nextDate: iso(s.nextChargeDate),

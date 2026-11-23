@@ -21,6 +21,10 @@ import {
   ConfirmInputDto,
   recurringSchema,
   RecurringInputDto,
+  guestIntentSchema,
+  GuestIntentInputDto,
+  guestConfirmSchema,
+  GuestConfirmInputDto,
 } from './payments.dto';
 
 /** Express request that carries the raw body (NestFactory rawBody:true). */
@@ -50,6 +54,30 @@ export class PaymentsController {
     @Body(new ZodValidationPipe(confirmSchema)) dto: ConfirmInputDto,
   ) {
     const res = await this.payments.confirm(user.userId, dto);
+    return ok(res);
+  }
+
+  // ─────────────── Guest checkout (public, IP rate-limited) ───────────────
+
+  // POST /api/payments/guest/intent — one-time gift without an account
+  @Public()
+  @RateLimit({ limit: 10, windowSeconds: 3600, by: 'ip', name: 'guest-payment-intent' })
+  @Post('guest/intent')
+  async createGuestIntent(
+    @Body(new ZodValidationPipe(guestIntentSchema)) dto: GuestIntentInputDto,
+  ) {
+    const res = await this.payments.createGuestIntent(dto);
+    return ok(res, 'Payment initiated — complete it with your card');
+  }
+
+  // POST /api/payments/guest/confirm — finalise a guest gift (needs its clientSecret)
+  @Public()
+  @RateLimit({ limit: 20, windowSeconds: 3600, by: 'ip', name: 'guest-payment-confirm' })
+  @Post('guest/confirm')
+  async confirmGuest(
+    @Body(new ZodValidationPipe(guestConfirmSchema)) dto: GuestConfirmInputDto,
+  ) {
+    const res = await this.payments.confirmGuest(dto);
     return ok(res);
   }
 

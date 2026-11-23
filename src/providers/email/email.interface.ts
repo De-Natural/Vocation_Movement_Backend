@@ -6,6 +6,9 @@
 export type EmailTemplate =
   | 'welcome'
   | 'email-verify'
+  | 'email-otp'
+  | 'withdrawal-paid'
+  | 'withdrawal-failed'
   | 'profile-approved'
   | 'profile-rejected'
   | 'info-requested'
@@ -19,7 +22,8 @@ export type EmailTemplate =
   | 'sponsorship-cancelled'
   | 'password-reset'
   | 'new-student-submission'
-  | 'contact-inquiry';
+  | 'contact-inquiry'
+  | 'maintenance-notice';
 
 export interface SendEmailInput {
   to: string;

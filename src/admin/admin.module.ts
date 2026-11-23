@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
+import { AuthModule } from '../auth/auth.module';
 
 /**
  * Admin module — PRD 3.7 / ARCHITECTURE §7.5, §7.8, §7.9.
@@ -9,6 +10,7 @@ import { AdminService } from './admin.service';
  * congregation reports. Every route is @Roles('ADMIN').
  */
 @Module({
+  imports: [AuthModule],
   controllers: [AdminController],
   providers: [AdminService],
   exports: [AdminService],

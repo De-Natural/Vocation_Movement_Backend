@@ -15,12 +15,15 @@ import {
   RegisterInput,
   ResetPasswordInput,
 } from './auth.dto';
-import { isStaff } from '../common/auth/staff';
+import { isStaff, isSuperAdmin } from '../common/auth/staff';
 import { SettingsService } from '../settings/settings.service';
 import { MAINTENANCE_MESSAGE } from '../common/auth/maintenance.guard';
+import { OtpService } from '../otp/otp.service';
 
-const BCRYPT_COST = 12; // PRD §5.2
-const EMAIL_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h verify
+// bcryptjs is pure JavaScript: cost 12 took ~0.5-1s per sign-in on modest
+// servers. 10 keeps strong hashing (OWASP minimum) at a quarter of the time.
+// Existing cost-12 hashes still verify; new ones use 10.
+const BCRYPT_COST = 10;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h reset
 
 export type UserWithProfiles = Prisma.UserGetPayload<{
@@ -41,6 +44,7 @@ export class AuthService {
     private readonly tokens: TokenService,
     private readonly notifications: NotificationsService,
     private readonly settings: SettingsService,
+    private readonly otp: OtpService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -105,7 +109,7 @@ export class AuthService {
     });
 
     // Email verification token + email
-    await this.sendVerificationEmail(user);
+    await this.sendVerificationEmail(user, input.fullName);
 
     // Notify admins of a new student submission (PRD §7)
     if (role === 'RELIGIOUS') {
@@ -144,9 +148,8 @@ export class AuthService {
       );
     }
 
-    if (!isStaff(user.role) && (await this.settings.effective()).maintenanceMode) {
-      throw AppException.serviceUnavailable(MAINTENANCE_MESSAGE, 'MAINTENANCE_MODE');
-    }
+    // Maintenance: only the Super-Admin may sign in (admins included in the lockout).
+    await this.assertNotInMaintenance(user.role);
 
     const tokens = await this.issueTokens(user);
     // "Last active" for staff monitoring (best effort).
@@ -157,15 +160,38 @@ export class AuthService {
   }
 
   // ─────────────────────────── Refresh ───────────────────────────
-  async refresh(rawRefreshToken: string): Promise<AuthTokens & { role: Role }> {
+  async refresh(rawRefreshToken: string): Promise<AuthTokens & { role: Role; user: UserWithProfiles }> {
     const { userId, refreshToken } =
       await this.tokens.rotateRefreshToken(rawRefreshToken);
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    // Profiles included so the response can carry the session profile and
+    // the browser doesn't need a second round trip to /me on every load.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { religiousProfile: true, sponsorProfile: true },
+    });
     if (!user || user.isSuspended) {
       throw AppException.unauthorized('Account no longer active');
     }
+    // Maintenance: a non-Super-Admin session ends here (the controller clears cookies).
+    try {
+      await this.assertNotInMaintenance(user.role);
+    } catch (err) {
+      await this.tokens.revokeRefreshToken(refreshToken);
+      throw err;
+    }
     const accessToken = await this.tokens.signAccessToken(user);
-    return { accessToken, refreshToken, role: user.role };
+    return { accessToken, refreshToken, role: user.role, user };
+  }
+
+  /** 503 MAINTENANCE_MODE for everyone but the Super-Admin while maintenance is on. */
+  private async assertNotInMaintenance(role: Role): Promise<void> {
+    const { maintenanceMode, maintenanceMessage } = await this.settings.effective();
+    if (maintenanceMode && !isSuperAdmin(role)) {
+      throw AppException.serviceUnavailable(
+        maintenanceMessage || MAINTENANCE_MESSAGE,
+        'MAINTENANCE_MODE',
+      );
+    }
   }
 
   // ─────────────────────────── Logout ───────────────────────────
@@ -325,25 +351,25 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
-  private async sendVerificationEmail(user: User): Promise<void> {
-    const token = randomUUID() + randomUUID();
-    await this.prisma.emailToken.create({
-      data: {
-        userId: user.id,
-        token,
-        purpose: 'verify-email',
-        expires: new Date(Date.now() + EMAIL_TOKEN_TTL_MS),
-      },
-    });
-    // Link to the frontend page, which calls GET /api/auth/verify-email/:token
-    // and shows the result (the raw API URL would only render JSON).
-    const link = `${this.config.frontendUrl}/verify-email?token=${token}`;
+  /** Email a 6-digit code; the user types it in during sign-up. */
+  private async sendVerificationEmail(user: User, name?: string): Promise<void> {
+    const code = await this.otp.issue({ userId: user.id, purpose: 'email-verify', target: user.email });
     await this.notifications.sendEmail({
       to: user.email,
-      template: 'email-verify',
-      subject: 'Verify your email — Vocation Movement',
-      data: { link, expiresInHours: 24 },
+      template: 'email-otp',
+      subject: `${code} is your Vocation Movement verification code`,
+      data: { code, name, expiresInMinutes: 10 },
     });
+  }
+
+  // ─────────────────────────── Verify email with a code ───────────────────────────
+  async verifyEmailOtp(rawEmail: string, code: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email: rawEmail.toLowerCase().trim() } });
+    // Same answer for unknown emails as for a wrong code.
+    if (!user) throw AppException.badRequest('Incorrect code.', 'OTP_INVALID');
+    if (user.isVerified) return;
+    await this.otp.verify({ userId: user.id, purpose: 'email-verify', code });
+    await this.prisma.user.update({ where: { id: user.id }, data: { isVerified: true } });
   }
 
   private async notifyAdminsNewSubmission(studentName: string): Promise<void> {
@@ -357,7 +383,11 @@ export class AuthService {
           to: a.email,
           template: 'new-student-submission',
           subject: 'New student profile awaiting verification',
-          data: { studentName, submittedAt: new Date().toISOString() },
+          data: {
+            studentName,
+            submittedAt: new Date().toISOString(),
+            link: `${this.config.frontendUrl}/dashboard/admin/verifications`,
+          },
         }),
       ),
     );

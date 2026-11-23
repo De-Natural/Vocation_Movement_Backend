@@ -2,6 +2,14 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.module';
 import { APP_CONFIG, AppConfig } from '../config/configuration';
+import { SettingsService } from '../settings/settings.service';
+
+/** Naira per 1 unit of `currency` (1 for naira), or null when no rate is set. */
+export function nairaRate(currency: string, rates: Record<string, number>): number | null {
+  if (currency === 'NGN') return 1;
+  const r = rates[currency];
+  return r && r > 0 ? r : null;
+}
 
 /**
  * Central recomputation of server-derived financial values (PRD §4.5,
@@ -17,7 +25,74 @@ export class AggregationService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly settings: SettingsService,
   ) {}
+
+  /**
+   * Lock a confirmed payment's naira value (and its splits') at the
+   * Super-Admin's current rate. Done once: later rate changes don't move
+   * past gifts. Returns false when there's no rate for its currency yet
+   * (it is then left out of naira totals until a rate is set).
+   */
+  async lockNaira(paymentId: string, tx?: Prisma.TransactionClient): Promise<boolean> {
+    const db = tx ?? this.prisma;
+    const payment = await db.payment.findUnique({ where: { id: paymentId }, include: { splits: true } });
+    if (!payment || payment.nairaNetCents !== null) return false;
+    const rate = nairaRate(payment.currency, (await this.settings.effective()).payoutFxRates);
+    if (!rate) return false;
+    await db.payment.update({
+      where: { id: payment.id },
+      data: {
+        fxRate: rate,
+        nairaAmountCents: Math.round(payment.amountCents * rate),
+        nairaNetCents: Math.round(payment.netAmountCents * rate),
+      },
+    });
+    for (const s of payment.splits) {
+      await db.paymentSplit.update({
+        where: { id: s.id },
+        data: {
+          nairaAmountCents: Math.round(s.amountCents * rate),
+          nairaNetCents: Math.round(s.netAmountCents * rate),
+        },
+      });
+    }
+    return true;
+  }
+
+  /**
+   * Give a naira value to every confirmed gift that has none yet, using the
+   * current rates (run after the Super-Admin saves exchange rates), then
+   * refresh the progress bars and totals they feed. Returns how many gifts
+   * were converted.
+   */
+  async backfillNaira(): Promise<number> {
+    const pending = await this.prisma.payment.findMany({
+      where: { status: 'CONFIRMED', nairaNetCents: null },
+      select: { id: true, religiousId: true, splits: { select: { billId: true } } },
+    });
+    let converted = 0;
+    for (const p of pending) {
+      if (await this.lockNaira(p.id)) converted += 1;
+    }
+    // Refresh every bill and student that has gifts, so no total still holds
+    // amounts added up across currencies (how totals were kept before naira).
+    const [bills, students] = await Promise.all([
+      this.prisma.paymentSplit.findMany({
+        where: { payment: { status: 'CONFIRMED' } },
+        distinct: ['billId'],
+        select: { billId: true },
+      }),
+      this.prisma.payment.findMany({
+        where: { status: 'CONFIRMED' },
+        distinct: ['religiousId'],
+        select: { religiousId: true },
+      }),
+    ]);
+    for (const b of bills) await this.recomputeBill(b.billId);
+    for (const s of students) await this.recomputeReligiousAggregates(s.religiousId);
+    return converted;
+  }
 
   /**
    * The instant "now" resolves to for funding logic. Honours the optional
@@ -41,13 +116,13 @@ export class AggregationService {
     if (!bill) return;
 
     const agg = await db.paymentSplit.aggregate({
-      _sum: { netAmountCents: true },
+      _sum: { nairaNetCents: true },
       where: { billId, payment: { status: 'CONFIRMED' } },
     });
     // Progress bars track the NET credited to the bill (gift − platform fee,
-    // Fee Model A). Legacy/seeded splits have netAmountCents == amountCents,
-    // so this is identical to the old gross sum until a fee is charged.
-    const raisedCents = agg._sum.netAmountCents ?? 0;
+    // Fee Model A), in naira: bills are in naira and every gift's naira value
+    // is locked at the Super-Admin's rate (gifts with no rate yet are left out).
+    const raisedCents = agg._sum.nairaNetCents ?? 0;
 
     let status = bill.status;
     if (status !== 'ARCHIVED') {
@@ -79,7 +154,7 @@ export class AggregationService {
 
     const [raised, needed, sponsors] = await Promise.all([
       db.payment.aggregate({
-        _sum: { netAmountCents: true },
+        _sum: { nairaNetCents: true },
         where: { religiousId, status: 'CONFIRMED' },
       }),
       db.bill.aggregate({
@@ -88,8 +163,9 @@ export class AggregationService {
       }),
       db.payment.findMany({
         where: { religiousId, status: 'CONFIRMED' },
-        distinct: ['sponsorId'],
-        select: { sponsorId: true },
+        // One per sponsor account plus one per guest email (guests have no sponsorId).
+        distinct: ['sponsorId', 'guestEmail'],
+        select: { sponsorId: true, guestEmail: true },
       }),
     ]);
 
@@ -98,7 +174,7 @@ export class AggregationService {
       data: {
         // Net of platform fee, to match the sum of this profile's bill
         // progress bars (recomputeBill also sums netAmountCents).
-        totalRaisedCents: raised._sum.netAmountCents ?? 0,
+        totalRaisedCents: raised._sum.nairaNetCents ?? 0,
         totalNeededCents: needed._sum.totalCents ?? 0,
         sponsorCount: sponsors.length,
       },
@@ -112,9 +188,9 @@ export class AggregationService {
     activeRecurring: number;
     monthlyCommitmentCents: number;
   }> {
-    const [given, students, recurring] = await Promise.all([
+    const [given, students, recurring, { payoutFxRates }] = await Promise.all([
       this.prisma.payment.aggregate({
-        _sum: { amountCents: true },
+        _sum: { nairaAmountCents: true },
         where: { sponsorId, status: 'CONFIRMED' },
       }),
       this.prisma.payment.findMany({
@@ -124,16 +200,19 @@ export class AggregationService {
       }),
       this.prisma.sponsorship.findMany({
         where: { sponsorId, status: 'ACTIVE' },
-        select: { amountCents: true },
+        select: { amountCents: true, currency: true },
       }),
+      this.settings.effective(),
     ]);
 
+    // All in naira: past gifts at their locked value, the monthly commitment
+    // at today's rate (a currency with no rate counts as 0 until one is set).
     return {
-      totalGivenCents: given._sum.amountCents ?? 0,
+      totalGivenCents: given._sum.nairaAmountCents ?? 0,
       studentsSponsored: students.length,
       activeRecurring: recurring.length,
       monthlyCommitmentCents: recurring.reduce(
-        (sum, r) => sum + r.amountCents,
+        (sum, r) => sum + Math.round(r.amountCents * (nairaRate(r.currency, payoutFxRates) ?? 0)),
         0,
       ),
     };

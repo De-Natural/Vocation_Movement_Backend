@@ -8,6 +8,8 @@ import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { ProvidersModule } from './providers/providers.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { OtpModule } from './otp/otp.service';
+import { WithdrawalsModule } from './withdrawals/withdrawals.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { AggregationModule } from './aggregation/aggregation.module';
 import { SettingsModule } from './settings/settings.module';
@@ -54,6 +56,7 @@ import { AllExceptionsFilter } from './common/http/all-exceptions.filter';
     RedisModule,
     ProvidersModule,
     NotificationsModule,
+    OtpModule,
     UploadsModule,
     AggregationModule,
     SettingsModule,
@@ -70,6 +73,7 @@ import { AllExceptionsFilter } from './common/http/all-exceptions.filter';
     MessagesModule,
     InquiriesModule,
     JobsModule,
+    WithdrawalsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

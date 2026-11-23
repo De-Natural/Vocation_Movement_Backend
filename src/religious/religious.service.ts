@@ -181,7 +181,16 @@ export class ReligiousService {
     if (dto.school !== undefined) data.schoolName = dto.school;
     if (dto.country !== undefined) data.country = dto.country;
     if (dto.location !== undefined) data.location = dto.location;
-    if (dto.phoneNumber !== undefined) data.phoneNumber = dto.phoneNumber;
+    if (dto.phoneNumber !== undefined && dto.phoneNumber !== existing.phoneNumber) {
+      // A verified phone receives withdrawal codes: it can't be edited here.
+      if (existing.phoneVerifiedAt) {
+        throw AppException.forbidden(
+          'Your phone number is verified and used to confirm withdrawals. To change it, please contact the administrator.',
+          'PHONE_LOCKED',
+        );
+      }
+      data.phoneNumber = dto.phoneNumber;
+    }
     if (dto.dateOfBirth !== undefined)
       data.dateOfBirth = new Date(dto.dateOfBirth);
     if (dto.gender !== undefined) data.gender = dto.gender;
@@ -316,8 +325,8 @@ export class ReligiousService {
           status: 'CONFIRMED',
           isAnonymous: true,
         },
-        distinct: ['sponsorId'],
-        select: { sponsorId: true },
+        distinct: ['sponsorId', 'guestEmail'],
+        select: { sponsorId: true, guestEmail: true },
       }),
     ]);
 

@@ -4,6 +4,13 @@ import { STORAGE_PROVIDER } from './storage/storage.interface';
 import { LocalStorageProvider } from './storage/local-storage.provider';
 import { EMAIL_PROVIDER } from './email/email.interface';
 import { StubEmailProvider } from './email/stub-email.provider';
+import { SmtpEmailProvider } from './email/smtp-email.provider';
+import { SMS_PROVIDER } from './sms/sms.interface';
+import { TermiiSmsProvider } from './sms/termii-sms.provider';
+import { StubSmsProvider } from './sms/stub-sms.provider';
+import { PAYOUT_PROVIDER } from './payouts/payout.interface';
+import { PaystackPayoutProvider } from './payouts/paystack-payout.provider';
+import { StubPayoutProvider } from './payouts/stub-payout.provider';
 import {
   PAYSTACK_GATEWAY,
   STRIPE_GATEWAY,
@@ -35,10 +42,30 @@ import { StubGateway } from './payments/stub-gateway.provider';
     {
       provide: EMAIL_PROVIDER,
       inject: [APP_CONFIG],
-      useFactory: (_config: AppConfig) => {
-        // if (config.providerMode === 'live') return new ResendEmailProvider(config);
+      useFactory: (config: AppConfig) => {
+        // Real email as soon as SMTP is configured (independent of PROVIDER_MODE).
+        if (config.email.smtp.host) {
+          return new SmtpEmailProvider(config.email.smtp, config.email.from);
+        }
         return new StubEmailProvider();
       },
+    },
+    {
+      provide: SMS_PROVIDER,
+      inject: [APP_CONFIG],
+      useFactory: (config: AppConfig) =>
+        config.sms.termiiApiKey
+          ? new TermiiSmsProvider(config.sms.termiiApiKey, config.sms.termiiSenderId, config.sms.termiiChannel)
+          : new StubSmsProvider(),
+    },
+    {
+      provide: PAYOUT_PROVIDER,
+      inject: [APP_CONFIG],
+      useFactory: (config: AppConfig) =>
+        // Real money only when explicitly switched on.
+        config.payouts.live && config.paystack.secretKey
+          ? new PaystackPayoutProvider(config.paystack.secretKey)
+          : new StubPayoutProvider(),
     },
     {
       provide: STRIPE_GATEWAY,
@@ -63,6 +90,13 @@ import { StubGateway } from './payments/stub-gateway.provider';
       },
     },
   ],
-  exports: [STORAGE_PROVIDER, EMAIL_PROVIDER, STRIPE_GATEWAY, PAYSTACK_GATEWAY],
+  exports: [
+    STORAGE_PROVIDER,
+    EMAIL_PROVIDER,
+    SMS_PROVIDER,
+    PAYOUT_PROVIDER,
+    STRIPE_GATEWAY,
+    PAYSTACK_GATEWAY,
+  ],
 })
 export class ProvidersModule {}

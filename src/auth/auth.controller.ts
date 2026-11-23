@@ -24,6 +24,8 @@ import {
   registerSchema,
   resetPasswordSchema,
   resendVerificationSchema,
+  verifyEmailOtpSchema,
+  VerifyEmailOtpInput,
   LoginInput,
   ForgotPasswordInput,
   ResetPasswordInput,
@@ -143,7 +145,17 @@ export class AuthController {
     try {
       const tokens = await this.auth.refresh(raw);
       this.setSessionCookies(res, tokens.refreshToken, tokens.role);
-      return ok({ accessToken: tokens.accessToken });
+      const u = tokens.user;
+      return ok({
+        accessToken: tokens.accessToken,
+        // Session profile (same fields as /me) so the app needs one call, not two.
+        userId: u.id,
+        role: roleToApi[u.role],
+        name: displayName(u),
+        email: u.email,
+        photo: u.religiousProfile?.photoUrl ?? u.sponsorProfile?.photoUrl ?? undefined,
+        isVerified: u.isVerified,
+      });
     } catch (err) {
       // Dead session: drop the hint cookie too, so the frontend middleware
       // stops treating this browser as signed in.
@@ -175,8 +187,19 @@ export class AuthController {
     await this.auth.resendVerification(dto.email);
     return ok(
       { sent: true },
-      'If that account still needs verifying, a new link has been sent.',
+      'If that account still needs verifying, a new code has been sent.',
     );
+  }
+
+  // POST /api/auth/verify-email-otp — the 6-digit code from the sign-up email
+  @Public()
+  @RateLimit({ limit: 10, windowSeconds: 900, name: 'verify-email-otp' })
+  @Post('verify-email-otp')
+  async verifyEmailOtp(
+    @Body(new ZodValidationPipe(verifyEmailOtpSchema)) dto: VerifyEmailOtpInput,
+  ) {
+    await this.auth.verifyEmailOtp(dto.email, dto.code);
+    return ok({ verified: true }, 'Email verified.');
   }
 
   // GET /api/auth/verify-email/:token
@@ -221,7 +244,7 @@ export class AuthController {
       // userId / name / photo are what the frontend session store reads.
       userId: user.id,
       name: displayName(user),
-      photo: user.religiousProfile?.photoUrl ?? undefined,
+      photo: user.religiousProfile?.photoUrl ?? user.sponsorProfile?.photoUrl ?? undefined,
       email: user.email,
       role: roleToApi[user.role],
       isVerified: user.isVerified,

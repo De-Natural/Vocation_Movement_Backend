@@ -176,6 +176,16 @@ export class AdminController {
     return ok(await this.admin.reports());
   }
 
+  // GET /api/admin/reports/:id/pdf — download a report as a real PDF
+  @Get('reports/:id/pdf')
+  async reportPdf(@Param('id') id: string, @Res() res: Response) {
+    const { filename, pdf } = await this.admin.reportPdf(id);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', String(pdf.length));
+    return res.send(pdf);
+  }
+
   // POST /api/admin/reports — generate a report
   @Post('reports')
   async generateReport(

@@ -175,6 +175,13 @@ export class MessagesService {
           'GIFT_NOT_CONFIRMED',
         );
       }
+      // Guest gifts have no account to message — the receipt email is all they get.
+      if (!payment.sponsorId || !payment.sponsor) {
+        throw AppException.unprocessable(
+          'This gift was made by a guest without an account, so they cannot receive messages',
+          'GUEST_DONOR',
+        );
+      }
       return {
         sponsorId: payment.sponsorId,
         sponsorUserId: payment.sponsor.userId,

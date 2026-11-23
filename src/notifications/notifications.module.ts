@@ -40,17 +40,17 @@ export class NotificationsService {
     });
   }
 
-  /** Send a templated email (via the configured provider). */
+  /**
+   * Send a templated email (via the configured provider) in the
+   * background: the request returns at once instead of waiting 1-3 s for
+   * the mail server. Failures are logged and never break the request.
+   */
   async sendEmail(input: SendEmailInput): Promise<void> {
-    try {
-      await this.email.send(input);
-    } catch (err) {
-      // Email failures must never break the request flow.
+    void this.email.send(input).catch((err: unknown) => {
       this.logger.error(
-        `Email send failed (${input.template} → ${input.to})`,
-        err as Error,
+        `Email send failed (${input.template} → ${input.to}): ${(err as Error)?.message ?? err}`,
       );
-    }
+    });
   }
 }
 
